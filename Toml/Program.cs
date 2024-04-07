@@ -16,6 +16,10 @@ using System.Runtime.Intrinsics.X86;
 using System.Threading;
 using BenchmarkDotNet.Columns;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using System.Formats.Asn1;
+using System.Numerics;
+using System.ComponentModel;
+using System.Collections;
 #pragma warning disable IDE0290
 
 
@@ -47,14 +51,24 @@ internal class Program
         Console.WriteLine("Test3 | fruit.orange.color: " + root["fruit"]["orange"]["color"]);
         */
 
-        using FileStream fs = new("C:/Users/BAGOLY/Desktop/a.txt", FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan);
+        using FileStream fs = new("C:/Users/BAGOLY/Desktop/ab.txt", FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan);
 
         TOMLTokenizer t = new(fs);
 
+        t.TokenizeFile();
 
+        Console.ForegroundColor = ConsoleColor.Red;
+        foreach (var msg in t.TempErrorLogger.Value)
+            Console.WriteLine(msg);
+        Console.ResetColor();
+
+        List<string> output = new(3);
+        Console.OutputEncoding = Encoding.UTF8;
+        foreach (var token in t.TokenStream)
+            if (token.TokenType is TOMLTokenType.String)
+                Console.WriteLine("Type string, value: '" + token.Payload + "'");
         //StreamReader sr = new("C:\\Users\\BAGOLY\\Desktop\\a.txt");
     }
-
 
     private static IEnumerable<(int start, int end)> GetKey(string str)
     {
@@ -157,11 +171,11 @@ sealed class TOMLTokenizer
     internal const string Empty = "";
     #endregion
 
-    private TOMLStreamReader Reader { get; init; }
+    public TOMLStreamReader Reader { get; init; }
 
-    private Queue<TOMLToken> TokenStream { get; init; }
+    public Queue<TOMLToken> TokenStream { get; init; }
 
-    Lazy<List<string>> TempErrorLogger { get; init; }
+    public Lazy<List<string>> TempErrorLogger { get; init; }
 
     public TOMLTokenizer(Stream source, int capacity = 32)
     {
@@ -172,12 +186,12 @@ sealed class TOMLTokenizer
 
     public Queue<TOMLToken> TokenizeFile()
     {
-        while (Reader.Peek() is not EOF)
+        while (Reader.PeekSkip() is not EOF)
         {
             Tokenize();
         }
 
-        TokenStream.Enqueue(new(TOMLTokenType.Eof, -1, -1));
+        TokenStream.Enqueue(new(TOMLTokenType.Eof, -1, -1, []));
         return TokenStream;
     }
 
@@ -204,26 +218,28 @@ sealed class TOMLTokenizer
 
     private void Tokenize()
     {
-        char readResult = Reader.ReadSkip();
-
-        if (readResult is EOF) //Empty source file
+        if (IsKey(Reader.PeekSkip(true)))
+        {
+            TokenizeKeyValuePair();
             return;
+        }
+
+        char readResult = Reader.ReadSkip(true);
+        //Console.WriteLine("Main: read result: " + readResult);
 
         switch (readResult)
         {
+            case EOF: return; //Empty source file
+
             case Comment: TokenizeComment(); return;
 
             case SquareOpen: TokenizeTable(); return;
 
             default:
-                if (!IsKey(readResult))
-                {
-                    TempErrorLogger.Value.Add("no clue what this char is here for bro");
-                    //some possible scenarios: if its eq then probably a missing key decl, sort it out later
-                    //can switch on the violating char when the tokenizer and rules are well in place
-                    Synchronize(LF);
-                }
-                TokenizeKeyValuePair();
+                TempErrorLogger.Value.Add("Unexpected top level character: " + readResult);
+                //some possible scenarios: if its eq then probably a missing key decl, sort it out later
+                //can switch on the violating char when the tokenizer and rules are well in place
+                Synchronize(LF);
                 return;
         }
 
@@ -231,6 +247,8 @@ sealed class TOMLTokenizer
 
     private void TokenizeComment()
     {
+        //Control is passed to this method when Tokenize() encounters a '#' character.
+        //The '#' character is consumed!
         char c;
 
         while ((c = Reader.ReadSkip()) is not EOF)
@@ -248,58 +266,86 @@ sealed class TOMLTokenizer
 
     private void TokenizeTable()
     {
-        if (Reader.MatchNextSkip(SquareOpen))
+        //Control is passed to this method when Tokenize() encounters a '[' character
+        //The '[' character is consumed!
+
+        //Console.WriteLine("table found, next will be: " + Reader.PeekSkip());
+        if (Reader.MatchNextSkip(SquareOpen)) //Double '[' means an arraytable
         {
             TokenizeArrayTable();
             return;
         }
 
-        else
-            TokenizeKey();
+        //Decl tokens will be used for scope switches in the parser.
+        TokenStream.Enqueue(new(TOMLTokenType.TableDecl, Reader.Line, Reader.Column, []));
+
+        TokenizeKey(TOMLTokenType.Table);                   //Tokenize the table's key, and mark that it's part of a table declaration
 
 
-        if (Reader.PeekSkip() is not SquareClose)
+        if (!Reader.MatchNextSkip(SquareClose)) //Assert that the table declaration is terminated, log error then sync if not.
         {
             TempErrorLogger.Value.Add("Unterminated table declaration.");
-            Synchronize(1);
+            Synchronize(LF);
+            return;
         }
+
+        //Console.WriteLine("No errors with table decl");
     }
 
     private void TokenizeArrayTable()
     {
-        TokenizeKey();
+        //Control is passed here when TokenizeTable() encounters a second '[' character.
+        //Because TokenizeTable calls MatchNextSkip, the second '[' is already consumed.
 
-        if (Reader.PeekSkip() != SquareClose || Reader.PeekNextSkip() != SquareClose)
+
+        //Decl tokens will be used for scope switches in the parser.
+        TokenStream.Enqueue(new(TOMLTokenType.ArrayTableDecl, Reader.Line, Reader.Column, []));
+
+
+        TokenizeKey(TOMLTokenType.ArrayTable);    //Tokenize the arraytable's key, and mark that it's part of an arraytable declaration.
+
+        if (!Reader.MatchNextSkip(SquareClose) || !Reader.MatchNextSkip(SquareClose))
         {
             TempErrorLogger.Value.Add("Unterminated arraytable declaration.");
             Synchronize(2);
+            return;
         }
     }
 
 
     private void TokenizeKeyValuePair()
     {
-        TokenizeKey();
+        TokenizeKey(TOMLTokenType.Key);          //Tokenize the keyvaluepair's key
 
         if (!Reader.MatchNextSkip(EqualsSign))
         {
-            TempErrorLogger.Value.Add("Key was not followed by = character.");
+            TempErrorLogger.Value.Add("Key was not followed by '=' character.");
+            Synchronize(LF);
         }
 
         TokenizeValue();
 
-        if (Reader.PeekSkip() is not LF or Comment)
+
+        if (Reader.PeekSkip() is not (CR or LF or EOF or Comment))
         {
             TempErrorLogger.Value.Add("Found trailing characters after keyvaluepair.");
+
+            Console.WriteLine("Rest: " + Reader.BaseReader.ReadToEnd());
+
             Synchronize(LF);
         }
     }
 
 
-    private void TokenizeKey()
+    private void TokenizeKey(TOMLTokenType keyTypeModifier)
     {
-        char c = Reader.ReadSkip();
+        //Control is passed to this method from:
+        //1. When a top-level key is found, passed as: Tokenize()->TokenizeKeyValuePair()->TokenizeKey().
+        //2. TokenizeArrayTable(), after verifying both '[' characters.
+        //3. TokenizeTable(), after verifying the '[' character.
 
+
+        char c = Reader.PeekSkip();
         if (c is EOF)
         {
             TempErrorLogger.Value.Add("Expected key but the end of file was reached");
@@ -308,24 +354,56 @@ sealed class TOMLTokenizer
 
         do
         {
+            TokenizeFragment(keyTypeModifier);
+        } while (Reader.MatchNextSkip(Dot));
+    }
+
+    private void TokenizeFragment(TOMLTokenType keyTypeModifier)
+    {
+        //Control is passed to this method from TokenizeKey() for each key fragment.
+
+        char c = Reader.PeekSkip();
+        Console.WriteLine("Fragment started, read: " + c);
+        if (c is EOF)
+        {
+            TempErrorLogger.Value.Add("Expected fragment but the end of file was reached");
+            return;
+        }
+
+        ValueStringBuilder vsb = new(stackalloc char[64]);
+        TOMLTokenMetadata keyMetadata = TOMLTokenMetadata.QuotedKey;
+        try
+        {
             switch (c)
             {
-                case DoubleQuote: TokenizeString(); break;
-                case SingleQuote: TokenizeLiteralString(); break;
-                default: TokenizeBareKey(); break;
+                case DoubleQuote:
+                    TokenizeString(ref vsb);
+                    break;
+                case SingleQuote:
+                    TokenizeLiteralString(ref vsb);
+                    break;
+                default:
+                    TokenizeBareKey(ref vsb);
+                    keyMetadata = TOMLTokenMetadata.None;
+                    break;
             }
+            TokenStream.Enqueue(new(keyTypeModifier, Reader.Line, Reader.Column, vsb.RawChars, keyMetadata));
+        }
+        finally { vsb.Dispose(); }
 
-            //key building logic here OR add keys separately and handle them in the parser
-        } while (Reader.PeekSkip() is Dot);
+        Console.WriteLine("Fragment finished, key: " + TokenStream.Last().Payload);
     }
 
 
     private void TokenizeArray()
     {
+
+        //When control is passed to this method, the first [ is already consumed.
+        TokenStream.Enqueue(new(TOMLTokenType.ArrayStart, Reader.Line, Reader.Column, []));
+
         do
         {
             TokenizeValue();
-
         } while (Reader.MatchNextSkip(Comma));
 
         if (!Reader.MatchNextSkip(SquareClose))
@@ -333,61 +411,244 @@ sealed class TOMLTokenizer
             TempErrorLogger.Value.Add("Unterminated array");
             Synchronize(1); //dont currently have a better idea for a syncpoint, so skip one then see where it goes..
         }
+
+        else
+            TokenStream.Enqueue(new(TOMLTokenType.ArrayEnd, Reader.Line, Reader.Column, []));
     }
 
 
     private void TokenizeValue()
     {
+        //Control is passed to this method from TokenizeArray() or TokenizeKeyValuePair()
+        //No characters are consumed, including leading double quotes for strings.
 
-    }
+        //A note on peeknext: it is currently fucked, but touching it might fuck up other parts of
+        //the code. It currently consumes on a match, so the first ' or " is already consumed.
 
-    private void TokenizeBareKey()
-    {
-        char c;
-        
-        //ref structs with proper Dispose() methods are pattern matched and handled without needing an explicit IDisposable declaration (ref structs cannot implement interfaces)
-        using ValueStringBuilder vsb = new(stackalloc char[128]); 
+        ValueStringBuilder buffer = new(stackalloc char[64]);
 
-        while ((c = Reader.Peek()) is not EOF)
+        try
         {
-            if (IsBareKey(c))
-                vsb.Append(c);
-
-            else if (c is Space or Tab or EqualsSign)//key token finished
-                return;
-
-            else
+            switch (Reader.PeekSkip())
             {
-                TempErrorLogger.Value.Add($"Bare keys cannot contain the character '{c}'");
-                Synchronize(LF); //if key failed, consider the entire line invalid
-                return;
+                case DoubleQuote when Reader.PeekNext() is DoubleQuote:
+                    TokenizeMultiLineString(ref buffer);
+                    TokenStream.Enqueue(new(TOMLTokenType.String, Reader.Line, Reader.Column, buffer.RawChars, TOMLTokenMetadata.Multiline));
+                    break;
+
+                case DoubleQuote:
+                    TokenizeString(ref buffer);
+                    TokenStream.Enqueue(new(TOMLTokenType.String, Reader.Line, Reader.Column, buffer.RawChars));
+                    break;
+
+                case SingleQuote when Reader.PeekNext() is SingleQuote:
+                    TokenizeLiteralMultiLineString(ref buffer);
+                    TokenStream.Enqueue(new(TOMLTokenType.String, Reader.Line, Reader.Column, buffer.RawChars, TOMLTokenMetadata.MultilineLiteral));
+                    break;
+
+                case SingleQuote:
+                    TokenizeLiteralString(ref buffer);
+                    TokenStream.Enqueue(new(TOMLTokenType.String, Reader.Line, Reader.Column, buffer.RawChars, TOMLTokenMetadata.Literal));
+                    break;
+
+                case SquareOpen:
+                    TokenizeArray();
+                    break;
+
+                default:
+                    TempErrorLogger.Value.Add($"Could find a parse method for value token {Reader.PeekSkip()}");
+                    Synchronize(LF);
+                    return;
             }
         }
 
-        if (true)
-            Console.WriteLine("string val " + vsb.ToString());
+        finally { buffer.Dispose(); }
+    }
+
+    private void TokenizeBareKey(ref ValueStringBuilder vsb)
+    {
+        while (IsBareKey(Reader.PeekSkip()))
+            vsb.Append(Reader.ReadSkip());
     }
 
 
-    private void TokenizeString()
+    private void TokenizeString(ref ValueStringBuilder vsb) //TODO: escape sequences, enforce one-line only
     {
+        char c;
+        while ((c = Reader.Read()) is not (EOF or DoubleQuote))
+        {
+            if (c is LF || c is CR && Reader.Peek() is LF)
+            {
+                TempErrorLogger.Value.Add("Basic strings cannot span multiple lines. Newline was removed.");
+            }
 
+            else if (c is '\\')
+            {
+                if (Reader.Peek() is Space)
+                {
+                    TempErrorLogger.Value.Add("Only multiline strings can contain line ending backslashes.");
+                    Synchronize(LF);
+                    return;
+                }
+                EscapeSequence(ref vsb);
+            }
+
+            else
+                vsb.Append(c);
+        }
+
+
+        if (c is not DoubleQuote)
+        {
+            TempErrorLogger.Value.Add("Unterminated string");
+            Synchronize(LF);
+            return;
+        }
+
+        //string is added in TokenizeValue(), DO NOT ADD ANYTHING HERE.
+        //This is so that only one ValueStringBuilder is allocated.
     }
 
-    private void TokenizeMultiLineString()
+    private void TokenizeMultiLineString(ref ValueStringBuilder vsb)
     {
+        if (!Reader.MatchNext(DoubleQuote) || !Reader.MatchNext(DoubleQuote))
+        {
+            TempErrorLogger.Value.Add("Multiline strings must start with '\"\"\"'");
+            Synchronize(LF);
+            return;
+        }
 
+        if (Reader.Peek() is LF || Reader.Peek() is CR && Reader.PeekNext() is LF)
+            Reader.Read();//skip newline if immediately after delimiter
+
+        char c;
+        while ((c = Reader.Read()) is not EOF)
+        {
+            if (c is DoubleQuote) //Found doublequote
+            {
+                if (CheckStringTerminate(ref vsb))
+                    return;
+
+                else
+                {
+                    Reader.Read();//idk anymore but it works. Basically, CheckStringTerminate consumed one less doublequote
+                    continue;
+                }
+            }
+
+            if (c is '\\')
+            {
+                if (Reader.Peek() is LF || Reader.Peek() is CR && Reader.PeekNext() is LF) //If line ending backlash
+                {
+                    c = Reader.ReadSkip(true); //Skip all whitespace and newlines, load next char
+                    if (c is DoubleQuote)      //Edge case; happens when the string immediately terminates after the backslash
+                        if (CheckStringTerminate(ref vsb))
+                            return;
+
+                    vsb.Append(c);            //A bit convoluted; code like this so the while loop wouldn't need modification
+                    continue;
+                }
+
+                else
+                {
+                    //Console.WriteLine("before  seq: " + (int)Reader.Peek());
+                    EscapeSequence(ref vsb);
+                    //Console.WriteLine("ret from seq: " + (int)Reader.Peek());
+                }
+            }
+
+            else
+                vsb.Append(c);
+        }
+
+
+        /*if (c is not DoubleQuote || !Reader.MatchNext(DoubleQuote) || !Reader.MatchNext(DoubleQuote))
+        {
+            TempErrorLogger.Value.Add("Unterminated string");
+            Synchronize(LF);
+            return;
+        }*/
+
+
+
+        //The standard on multiline basic strings: 
+        /* 
+           Multi-line basic strings are surrounded by three quotation marks 
+           on each side and allow newlines. 
+           
+           A newline immediately following the opening delimiter will be trimmed. 
+           All other whitespace and newline characters remain intact.
+         */
+
+        //so if there is a LF or CRLF after the leading """, remove it. All others are preserved.
+        //also says "feel free to normalize to whatever makes sense for the platform", but preserving might be better
+
+        //there is also a need for a c-style '\' nbsp char. When the last non-wp character
+        //on a line is a single '\', remove ALL wp, including LF and CRLF until the next non-wp character
+        //Escape sequences should still work as well.
     }
 
-
-    private void TokenizeLiteralString()
+    private bool CheckStringTerminate(ref ValueStringBuilder vsb)
     {
 
+        if (Reader.Peek() is not DoubleQuote)
+        {
+            vsb.Append(DoubleQuote);
+            return false;
+        }
+
+        else
+        {
+            Reader.Read();
+            if (Reader.Peek() is not DoubleQuote)
+            {
+                vsb.Append(DoubleQuote);
+                vsb.Append(DoubleQuote);
+                return false;
+            }
+
+            else
+            {
+                Synchronize(LF);
+                return true;
+            }
+        }
     }
 
-    private void TokenizeLiteralMultiLineString()
+    private void TokenizeLiteralString(ref ValueStringBuilder vsb)
+    {
+        if (!Reader.MatchNextSkip(SingleQuote))
+        {
+            TempErrorLogger.Value.Add("Basic strings must start with a '\"'");
+            Synchronize(LF);
+            return;
+        }
+        //When control is passed to this method, the leading singlequote is already consumed
+
+        //Literal strings are one-line only, like basic strings.
+        //As the name implies there is no escaping, all chars are tokenized as is.
+
+        //Control chars other than tab are not permitted inside literal strings.
+    }
+
+    private void TokenizeLiteralMultiLineString(ref ValueStringBuilder vsb)
     {
 
+        if (!Reader.MatchNextSkip(SingleQuote) || !Reader.MatchNextSkip(SingleQuote))
+        {
+            TempErrorLogger.Value.Add("Multiline literal strings must start with \"'''\"");
+            Synchronize(LF);
+            return;
+        }
+
+        //Like literal strings tHeRe Is No EsCaPe-ing; however, newlines are allowed.
+        //If there is a LF or CRLF after the leading ''', it will be removed.
+        //Everything else will be left as-is.
+
+        //Furthermore, 1 or 2 singlequotes are allowed anywhere.
+        //3 or more obviously terminates the string.
+
+        //Control chars other than tab are not permitted inside literal strings.
     }
 
     private void TokenizeInteger()
@@ -411,6 +672,115 @@ sealed class TOMLTokenizer
     {
 
     }
+
+
+    private void EscapeSequence(ref ValueStringBuilder vsb)
+    {
+        char initial = Reader.Read();
+
+        if (initial is 'U')
+        {
+            UnicodeLongForm(ref vsb);
+            return;
+        }
+
+        if (initial is 'u')
+        {
+            UnicodeShortForm(ref vsb);
+            return;
+        }
+
+        char result = initial switch
+        {
+            'b' => '\u0008',
+            't' => '\u0009',
+            'n' => '\u000A',
+            'f' => '\u000C',
+            'r' => '\u000D',
+            '"' => '\u0022',
+            '\\' => '\u005C',
+            _ => EOF,
+        };
+
+        if (result is EOF)
+        {
+            TempErrorLogger.Value.Add($"No escape sequence for character '{initial}' (U+{(int)initial:X8}).");
+            Synchronize(Space);
+            return;
+        }
+
+        vsb.Append(result);
+    }
+
+    private void UnicodeLongForm(ref ValueStringBuilder vsb)
+    {
+        //When control is passed to this method, only the numeric sequence remains (without '\' and 'U')
+        int codePoint = ToUnicodeCodepoint(8);
+
+        if (codePoint > MaxValue) //UTF-32 escape sequence, encode to surrogate pair
+        {
+            codePoint -= 0x10_000;
+            (int highS, int lowS) = Math.DivRem(codePoint, 0x400);
+
+
+            vsb.Append((char)(highS + 0xD800));
+            vsb.Append((char)(lowS + 0xDC00));
+            return;
+        }
+
+
+        vsb.Append((char)codePoint);
+        return;
+    }
+
+    private void UnicodeShortForm(ref ValueStringBuilder vsb)
+    {
+        int codePoint = ToUnicodeCodepoint(4);
+        vsb.Append((char)codePoint);
+    }
+
+
+    private int ToUnicodeCodepoint(int length)
+    {
+        Span<char> buffer = stackalloc char[length];
+        int charsRead = Reader.BaseReader.ReadBlock(buffer);
+
+        if (charsRead < length) //It's definitely not good...
+        {
+            if (buffer[charsRead - 1] is DoubleQuote or EOF) //More likely error
+            {
+                --Reader.BaseReader.BaseStream.Position;
+                TempErrorLogger.Value.Add($"Escape sequence '{buffer.ToString()}' is missing {5 - charsRead} digit(s).");
+            }
+
+            else//Generic error message
+                TempErrorLogger.Value.Add($"Escape sequence '{buffer.ToString()}' must consist of {length} hexadecimal characters.");
+
+            Synchronize(DoubleQuote);
+            return -1;
+        }
+
+        int codePoint = 0;
+
+        for (int i = 0; i < length; i++)
+        {
+            int digit = buffer[i] < 0x3A ? buffer[i] - 0x30 : (buffer[i] & 0x5F) - 0x37; //Convert char to hexadecimal digit
+
+            if (digit < 0 || digit > 15)
+            {
+                TempErrorLogger.Value.Add($"{i + 1}. character '{buffer[i]}' in escape sequence is not a hexadecimal digit.");
+                Synchronize(Space);
+            }
+
+            codePoint = (codePoint << 4) + digit; //Build up codepoint from digits
+        }
+
+        return codePoint;
+    }
+
+
+
+
 
 
     private static bool IsBareKey(char c) => IsAsciiLetter(c) || IsAsciiDigit(c) || c is '-' or '_';
@@ -452,14 +822,18 @@ sealed class TOMLTokenizer
                 containingTable = subtable;
             }
         }}*/
-
 }
+
 enum TOMLTokenType
 {
     Comment,
     Key,
+    TableDecl,
     Table,
-    Array,
+    ArrayStart,
+    ArrayEnd,
+    ArrayTable,
+    ArrayTableDecl,
     String,
     Integer,
     Float,
@@ -472,6 +846,7 @@ enum TOMLTokenType
 [Flags]
 enum TOMLTokenMetadata
 {
+    None = 0,
     QuotedKey = 1,
     Multiline = 2,
     Literal = 4,
@@ -490,471 +865,22 @@ readonly record struct TOMLToken : IEquatable<TOMLToken>
 {
     internal TOMLTokenType TokenType { get; init; }
 
+    internal string? Payload { get; init; }
+
     internal (int Line, int Column) Position { get; init; }
 
-    public TOMLToken(TOMLTokenType type, int ln, int col)
+    internal TOMLTokenMetadata? Metadata { get; init; }
+
+    public TOMLToken(TOMLTokenType type, int ln, int col, in ReadOnlySpan<char> payload, TOMLTokenMetadata? metadata = null)
     {
         TokenType = type;
         Position = (ln, col);
-    }
-}
-
-
-
-sealed class TOMLStreamReader : IDisposable
-{
-    internal StreamReader BaseReader { get; init; }
-
-    internal int Line { get; private set; }
-
-    internal int Column { get; private set; }
-
-    public TOMLStreamReader(Stream source)
-    {
-        if (!source.CanRead || !source.CanSeek)
-            throw new ArgumentException("Streams without read or seeking support cannot be used.");
-
-        BaseReader = new(source, Encoding.UTF8); //Encoding is UTF-8 by default.
-        Line = 0;
-        Column = 0;
-    }
-
-    private void SkipWhiteSpace()
-    {
-        while (BaseReader.Peek() is ' ' or '\t')
-            BaseReader.Read();
-    }
-
-
-    /// <summary>
-    /// Returns the next available character, consuming it. 
-    /// </summary>
-    /// <returns>The next available character, or <see langword="EOF"/>('\0') if no more characters are available to read.</returns>
-    public char Read()
-    {
-        int readResult = BaseReader.Read();
-        switch (readResult)
-        {
-            case -1: return '\0';
-
-            case '\n':
-                ++Line;
-                Column = 0;
-                return (char)readResult;
-
-            default:
-                ++Column;
-                return (char)readResult;
-        }
-    }
-
-
-    /// <summary>
-    /// Returns the next available character, consuming it. Ignores tab or skip.
-    /// </summary>
-    /// <returns>The next available character, or <see langword="EOF"/>('\0') if no more characters are available to read.</returns>
-    public char ReadSkip()
-    {
-        SkipWhiteSpace();
-        return Read();
-    }
-
-
-    /// <summary>
-    /// Returns the next available character, without consuming it.
-    /// </summary>
-    /// <returns><see langword="EOF"/> ('\0') if there are no characters to be read; otherwise, the next available character.</returns>
-    public char Peek()
-    {
-        int peekResult = BaseReader.Peek();
-        return peekResult is -1 ? '\0' : (char)peekResult;
-    }
-
-
-    /// <summary>
-    /// Returns the next available character, without consuming it. Ignores tab or space.
-    /// </summary>
-    /// <returns><see langword="EOF"/> ('\0') if there are no characters to be read; otherwise, the next available character.</returns>
-    public char PeekSkip()
-    {
-        SkipWhiteSpace();
-        return Peek();
-    }
-
-
-    /// <summary>
-    /// Returns the character after the next available character, without consuming it. Ignores tab or space.
-    /// </summary>
-    /// <returns>The character after the next available character, or <see langword="EOF"/> ('\0') if the end of the stream is reached first.</returns>
-    public char PeekNext()
-    {
-        if (BaseReader.Peek() == -1)
-            return '\0';
-
-        BaseReader.Read();
-
-        int peekResult = BaseReader.Peek();
-        BaseReader.BaseStream.Seek(-2, SeekOrigin.Current);
-
-        if (peekResult is -1)
-            return '\0';
-
-        return (char)peekResult;
-    }
-
-
-    /// <summary>
-    /// Returns the character after the next available character, without consuming it. Ignores tab or space.
-    /// </summary>
-    /// <returns>The character after the next available character, or <see langword="EOF"/> ('\0') if the end of the stream is reached first.</returns>
-    public char PeekNextSkip()
-    {
-        SkipWhiteSpace();
-        return PeekNext();
-    }
-
-
-    /// <summary>
-    /// Consumes the next character from the stream if it matches <paramref name="c"/>.
-    /// </summary>
-    /// <returns> <see langword="true"/> if <paramref name="c"/> matches the next character; otherwise <see langword="false"/>.</returns>
-    public bool MatchNext(char c)
-    {
-        if (BaseReader.Peek() == c)
-        {
-            BaseReader.Read();
-
-            if (c == '\n')
-            {
-                ++Line;
-                Column = 0;
-            }
-
-            else
-                ++Column;
-
-            return true;
-        }
-
-        return false;
-    }
-
-
-    /// <summary>
-    /// Consumes the next character from the stream if it matches <paramref name="c"/>. Ignores tab or space.
-    /// </summary>
-    /// <returns> <see langword="true"/> if <paramref name="c"/> matches the next character; otherwise <see langword="false"/>.</returns>
-    public bool MatchNextSkip(char c)
-    {
-        SkipWhiteSpace();
-        return MatchNext(c);
-    }
-
-    public void Dispose() => BaseReader.Dispose();
-}
-
-
-//.NET internal code
-public ref struct ValueStringBuilder //MUST BE PASSED AS REF WHEN ARGUMENT!
-{
-    private char[]? _arrayToReturnToPool;
-    private Span<char> _chars;
-    private int _appendedCharCount;
-
-    public ValueStringBuilder(Span<char> initialBuffer)
-    {
-        _arrayToReturnToPool = null;
-        _chars = initialBuffer;
-        _appendedCharCount = 0;
-    }
-
-    public ValueStringBuilder(int initialCapacity)
-    {
-        _arrayToReturnToPool = ArrayPool<char>.Shared.Rent(initialCapacity);
-        _chars = _arrayToReturnToPool;
-        _appendedCharCount = 0;
-    }
-
-    public int Length
-    {
-        readonly get => _appendedCharCount;
-        set
-        {
-            Debug.Assert(value >= 0);
-            Debug.Assert(value <= _chars.Length);
-            _appendedCharCount = value;
-        }
-    }
-
-    public readonly int Capacity => _chars.Length;
-
-    public void EnsureCapacity(int capacity)
-    {
-        Debug.Assert(capacity >= 0); //Not expected to be called with a negative value
-
-        if ((uint)capacity > (uint)_chars.Length)// If the caller has a bug and calls this with negative capacity, make sure to call Grow to throw an exception.
-            Grow(capacity - _appendedCharCount);
-    }
-
-
-    /// <summary>
-    /// Get a pinnable reference to the builder.
-    /// Does not ensure there is a null char after <see cref="Length"/>
-    /// This overload is pattern matched in the C# 7.3+ compiler so you can omit
-    /// the explicit method call, and write eg "fixed (char* c = builder)"
-    /// </summary>
-    public readonly ref char GetPinnableReference() => ref MemoryMarshal.GetReference(_chars);
-
-
-    /// <summary>
-    /// Get a pinnable reference to the builder.
-    /// </summary>
-    /// <param name="terminate">Ensures that the builder has a null char after <see cref="Length"/></param>
-    public ref char GetPinnableReference(bool terminate)
-    {
-        if (terminate)
-        {
-            EnsureCapacity(Length + 1);
-            _chars[Length] = '\0';
-        }
-
-        return ref MemoryMarshal.GetReference(_chars);
-    }
-
-    public ref char this[int index]
-    {
-        get
-        {
-            Debug.Assert(index < _appendedCharCount);
-            return ref _chars[index];
-        }
+        Payload = payload == ReadOnlySpan<char>.Empty ? null : payload.ToString();
+        Metadata = metadata;
     }
 
     public override string ToString()
     {
-        string s = _chars.Slice(0, _appendedCharCount).ToString();
-        Dispose();
-        return s;
-    }
-
-    public readonly Span<char> RawChars => _chars;
-
-
-    /// <summary>
-    /// Returns a span around the contents of the builder.
-    /// </summary>
-    /// <param name="terminate">Ensures that the builder has a null char after <see cref="Length"/></param>
-    public ReadOnlySpan<char> AsSpan(bool terminate)
-    {
-        if (terminate)
-        {
-            EnsureCapacity(Length + 1);
-            _chars[Length] = '\0';
-        }
-
-        return _chars[.._appendedCharCount];
-    }
-
-    public readonly ReadOnlySpan<char> AsSpan() => _chars[.._appendedCharCount];
-    public readonly ReadOnlySpan<char> AsSpan(int start) => _chars[start.._appendedCharCount];
-    public readonly ReadOnlySpan<char> AsSpan(int start, int length) => _chars.Slice(start, length);
-
-
-    public bool TryCopyTo(Span<char> destination, out int charsWritten)
-    {
-        if (_chars[.._appendedCharCount].TryCopyTo(destination))
-        {
-            charsWritten = _appendedCharCount;
-            Dispose();
-            return true;
-        }
-        else
-        {
-            charsWritten = 0;
-            Dispose();
-            return false;
-        }
-    }
-
-
-    public void Insert(int index, char value, int count)
-    {
-        if (_appendedCharCount > _chars.Length - count)
-            Grow(count);
-
-        int remaining = _appendedCharCount - index;
-
-        _chars.Slice(index, remaining).CopyTo(_chars.Slice(index + count));
-        _chars.Slice(index, count).Fill(value);
-
-        _appendedCharCount += count;
-    }
-
-
-    public void Insert(int index, string? s)
-    {
-        if (s is null)
-            return;
-
-        int count = s.Length;
-
-        if (_appendedCharCount > (_chars.Length - count))
-            Grow(count);
-
-
-        int remaining = _appendedCharCount - index;
-
-        _chars.Slice(index, remaining).CopyTo(_chars[(index + count)..]);
-        s.CopyTo(_chars[index..]);
-
-        _appendedCharCount += count;
-    }
-
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void Append(char c)
-    {
-        int pos = _appendedCharCount;
-
-        if ((uint)pos < (uint)_chars.Length)
-        {
-            _chars[pos] = c;
-            _appendedCharCount = pos + 1;
-        }
-
-        else
-            GrowAndAppend(c);
-    }
-
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void Append(string? s)
-    {
-        if (s is null)
-            return;
-
-        int pos = _appendedCharCount;
-
-        if (s.Length == 1 && (uint)pos < (uint)_chars.Length) // very common case, e.g. appending strings from NumberFormatInfo like separators, percent symbols, etc.
-        {
-            _chars[pos] = s[0];
-            _appendedCharCount = pos + 1;
-        }
-
-        else
-            AppendSlow(s);
-    }
-
-
-    private void AppendSlow(string s)
-    {
-        int pos = _appendedCharCount;
-
-        if (pos > _chars.Length - s.Length)
-            Grow(s.Length);
-
-        s.CopyTo(_chars[pos..]);
-        _appendedCharCount += s.Length;
-    }
-
-
-    public void Append(char c, int count)
-    {
-        if (_appendedCharCount > _chars.Length - count)
-            Grow(count);
-
-
-        Span<char> dst = _chars.Slice(_appendedCharCount, count);
-
-        for (int i = 0; i < dst.Length; i++)
-            dst[i] = c;
-
-        _appendedCharCount += count;
-    }
-
-
-    public unsafe void Append(char* value, int length)
-    {
-        int pos = _appendedCharCount;
-
-        if (pos > _chars.Length - length)
-            Grow(length);
-
-        Span<char> dst = _chars.Slice(_appendedCharCount, length);
-
-        for (int i = 0; i < dst.Length; i++)
-            dst[i] = *value++;
-
-        _appendedCharCount += length;
-    }
-
-
-    public void Append(ReadOnlySpan<char> value)
-    {
-        int pos = _appendedCharCount;
-
-        if (pos > _chars.Length - value.Length)
-            Grow(value.Length);
-
-        value.CopyTo(_chars[_appendedCharCount..]);
-        _appendedCharCount += value.Length;
-    }
-
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public Span<char> AppendSpan(int length)
-    {
-        int origPos = _appendedCharCount;
-
-        if (origPos > _chars.Length - length)
-            Grow(length);
-
-        _appendedCharCount = origPos + length;
-        return _chars.Slice(origPos, length);
-    }
-
-
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private void GrowAndAppend(char c)
-    {
-        Grow(1);
-        Append(c);
-    }
-
-
-    /// <summary>
-    /// Resize the internal buffer either by doubling current buffer size or
-    /// by adding <paramref name="additionalCapacityBeyondPos"/> to
-    /// <see cref="_pos"/> whichever is greater.
-    /// </summary>
-    /// <param name="additionalCapacityBeyondPos">
-    /// Number of chars requested beyond current position.
-    /// </param>
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private void Grow(int additionalCapacityBeyondPos)
-    {
-        Debug.Assert(additionalCapacityBeyondPos > 0);
-        Debug.Assert(_appendedCharCount > _chars.Length - additionalCapacityBeyondPos, "Grow called incorrectly, no resize is needed.");
-
-        // Make sure to let Rent throw an exception if the caller has a bug and the desired capacity is negative
-        char[] poolArray = ArrayPool<char>.Shared.Rent((int)Math.Max((uint)(_appendedCharCount + additionalCapacityBeyondPos), (uint)_chars.Length * 2));
-
-        _chars[.._appendedCharCount].CopyTo(poolArray);
-
-        char[]? toReturn = _arrayToReturnToPool;
-        _chars = _arrayToReturnToPool = poolArray;
-
-        if (toReturn != null)
-            ArrayPool<char>.Shared.Return(toReturn);
-    }
-
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void Dispose()
-    {
-        char[]? toReturn = _arrayToReturnToPool;
-        this = default; // for safety, to avoid using pooled array if this instance is erroneously appended to again
-        if (toReturn != null)
-            ArrayPool<char>.Shared.Return(toReturn);
+        return $"Type: {TokenType} | Value: '{Payload ?? "None"}'";
     }
 }
