@@ -62,7 +62,6 @@ namespace Toml
             }
         }
 
-
         /// <summary>
         /// Returns the next available character, consuming it. Ignores tab or skip.
         /// </summary>

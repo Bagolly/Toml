@@ -20,6 +20,7 @@ using System.Formats.Asn1;
 using System.Numerics;
 using System.ComponentModel;
 using System.Collections;
+using System.CodeDom;
 #pragma warning disable IDE0290
 
 
@@ -50,7 +51,7 @@ internal class Program
         Console.WriteLine("Test2 | animal.lifespan: " + root["animal"]["lifespan"]);
         Console.WriteLine("Test3 | fruit.orange.color: " + root["fruit"]["orange"]["color"]);
         */
-
+        
         using FileStream fs = new("C:/Users/BAGOLY/Desktop/ab.txt", FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan);
 
         TOMLTokenizer t = new(fs);
@@ -146,7 +147,6 @@ internal class Program
         i -= 1;
     }
 }
-
 
 sealed class TOMLTokenizer
 {
@@ -431,7 +431,7 @@ sealed class TOMLTokenizer
         {
             switch (Reader.PeekSkip())
             {
-                case DoubleQuote when Reader.PeekNext() is DoubleQuote:
+                case DoubleQuote when Reader.MatchNext(DoubleQuote):
                     TokenizeMultiLineString(ref buffer);
                     TokenStream.Enqueue(new(TOMLTokenType.String, Reader.Line, Reader.Column, buffer.RawChars, TOMLTokenMetadata.Multiline));
                     break;
@@ -441,7 +441,7 @@ sealed class TOMLTokenizer
                     TokenStream.Enqueue(new(TOMLTokenType.String, Reader.Line, Reader.Column, buffer.RawChars));
                     break;
 
-                case SingleQuote when Reader.PeekNext() is SingleQuote:
+                case SingleQuote when Reader.MatchNext(SingleQuote):
                     TokenizeLiteralMultiLineString(ref buffer);
                     TokenStream.Enqueue(new(TOMLTokenType.String, Reader.Line, Reader.Column, buffer.RawChars, TOMLTokenMetadata.MultilineLiteral));
                     break;
@@ -511,6 +511,8 @@ sealed class TOMLTokenizer
 
     private void TokenizeMultiLineString(ref ValueStringBuilder vsb)
     {
+        //When control is passed to this method, the first " is already consumed.
+
         if (!Reader.MatchNext(DoubleQuote) || !Reader.MatchNext(DoubleQuote))
         {
             TempErrorLogger.Value.Add("Multiline strings must start with '\"\"\"'");
@@ -518,8 +520,8 @@ sealed class TOMLTokenizer
             return;
         }
 
-        if (Reader.Peek() is LF || Reader.Peek() is CR && Reader.PeekNext() is LF)
-            Reader.Read();//skip newline if immediately after delimiter
+        if (Reader.Peek() is LF || Reader.Peek() is CR && Reader.PeekNext() is LF) //Skip newline if immediately after delimiter
+            Reader.Read();
 
         char c;
         while ((c = Reader.Read()) is not EOF)
@@ -720,11 +722,9 @@ sealed class TOMLTokenizer
         if (codePoint > MaxValue) //UTF-32 escape sequence, encode to surrogate pair
         {
             codePoint -= 0x10_000;
-            (int highS, int lowS) = Math.DivRem(codePoint, 0x400);
+            vsb.Append((char)((codePoint >> 10) + 0xD800));
+            vsb.Append((char)((codePoint & 0x3FF) + 0xDC00));
 
-
-            vsb.Append((char)(highS + 0xD800));
-            vsb.Append((char)(lowS + 0xDC00));
             return;
         }
 
