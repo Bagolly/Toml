@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection.PortableExecutable;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading.Tasks;
@@ -139,7 +140,7 @@ namespace Toml
         /// </summary>
         /// <returns> <see langword="true"/> if <paramref name="c"/> matches the next character; otherwise <see langword="false"/>.</returns>
         public bool MatchNext(char c)
-        {
+        {   
             if (BaseReader.Peek() == c)
             {
                 BaseReader.Read();
@@ -159,7 +160,32 @@ namespace Toml
             return false;
         }
 
+        /// <summary>
+        /// Consumes characters while they match <paramref name="c"/>, and stores the number of matches.
+        /// </summary>
+        /// <returns>The number of sequential occurrences of <paramref name="c"/> from the stream's current position, or 0 if no characters matched.</returns>
+        public int MatchCount(char c)
+        {
+            int cnt = 0;
+            while (MatchNext(c))
+                ++cnt;
+            return cnt;
+        }
 
+
+        /// <summary>
+        /// Consumes either a CR or CRLF line ending if it matches one.
+        /// </summary>
+        /// <returns><see langword="true"/> if a line ending was matched; otherwise <see langword="false"/>.</returns>
+        public bool MatchLineEnding() => MatchNext('\n') || MatchNext('\r') && MatchNext('\n');
+
+        /// <summary>
+        /// Consumes characters while they match <paramref name="c"/>.
+        /// </summary>
+        /// <param name="c"></param>
+        public void SkipWhile(char c) { while (MatchNext(c)) ; }
+        
+          
         /// <summary>
         /// Consumes the next character from the stream if it matches <paramref name="c"/>. Ignores tab or space.
         /// </summary>
