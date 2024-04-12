@@ -1,5 +1,5 @@
-﻿using System.Collections.Generic;
-using System.Collections;
+﻿using System.Collections;
+using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using static Toml.Runtime.TOMLExceptionHandler;
 
@@ -74,7 +74,7 @@ public sealed class TArray : TObject, IEnumerable<TObject>, ITCollection
     public void Add(TObject value) => Values.Add(value);
 
     public void Add(string key, TObject? val) => throw new NotImplementedException("Can't add to array like a table");
-    
+
 
     public override string ToString() => $"TOMLArray with {Values.Count} elements.";
 }
@@ -87,7 +87,7 @@ public sealed class TTable : TObject, IEnumerable<KeyValuePair<string, TObject>>
     public override TObject this[string index]
     {
         get => Values[index];
-        set => AddAssert(index, value);        
+        set => AddAssert(index, value);
     }
 
     public TObject this[in ReadOnlySpan<char> index]
@@ -124,7 +124,7 @@ public sealed class TTable : TObject, IEnumerable<KeyValuePair<string, TObject>>
     void ITCollection.Add(string key, TObject val) => Values.Add(key, val);
 
     void ITCollection.Add(TObject val) => throw new InvalidOperationException("Can't add to table like an array!");
-    
+
     public override TOMLType Type { get; protected init; }
 
     public TTable(bool isInline = false)

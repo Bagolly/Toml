@@ -1,11 +1,6 @@
-﻿using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Reflection.PortableExecutable;
+﻿using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text;
-using System.Threading.Tasks;
 
 namespace Toml
 {
@@ -23,20 +18,20 @@ namespace Toml
                 throw new ArgumentException("Streams without read or seeking support cannot be used.");
 
             BaseReader = new(source, Encoding.UTF8); //Encoding is UTF-8 by default.
-            Line = 0;
-            Column = 0;
+            Line = 1;
+            Column = 1;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void SkipWhiteSpace(bool skipNewLine = false)
         {
         SKIP:
-            switch (BaseReader.Peek())
+            switch (Peek())
             {
                 case ' ' or '\t':
                 case '\r' when skipNewLine && PeekNext() is '\n': //annoying fucking windows crlf line endings
                 case '\n' when skipNewLine:                       //normal person line ending
-                    BaseReader.Read(); goto SKIP;
+                    Read(); goto SKIP;
                 default: return;
             }
         }
@@ -108,12 +103,12 @@ namespace Toml
         /// <returns>The character after the next available character, or <see langword="EOF"/> ('\0') if the end of the stream is reached first.</returns>
         public char PeekNext()
         {
-            if (BaseReader.Peek() == -1)
+            if (Peek() == -1)
                 return '\0';
 
             BaseReader.Read();
 
-            int peekResult = BaseReader.Peek();
+            int peekResult = Peek();
 
             //BaseReader.BaseStream.Position -= 1; //Idk about this. Dont change for now.
 
@@ -140,10 +135,10 @@ namespace Toml
         /// </summary>
         /// <returns> <see langword="true"/> if <paramref name="c"/> matches the next character; otherwise <see langword="false"/>.</returns>
         public bool MatchNext(char c)
-        {   
-            if (BaseReader.Peek() == c)
+        {
+            if (Peek() == c)
             {
-                BaseReader.Read();
+                Read();
 
                 if (c == '\n')
                 {
@@ -184,8 +179,8 @@ namespace Toml
         /// </summary>
         /// <param name="c"></param>
         public void SkipWhile(char c) { while (MatchNext(c)) ; }
-        
-          
+
+
         /// <summary>
         /// Consumes the next character from the stream if it matches <paramref name="c"/>. Ignores tab or space.
         /// </summary>
