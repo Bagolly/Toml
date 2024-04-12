@@ -1,26 +1,12 @@
 ﻿global using System;
-using static System.Char;
-using Toml.Runtime;
-using System.Runtime.CompilerServices;
 using System.Collections.Generic;
-using System.Buffers;
 using System.Diagnostics;
-using System.Runtime.InteropServices;
 using System.IO;
-using System.Text;
-using System.Collections.Frozen;
-using System.Text.Json;
 using System.Linq;
-using System.IO.Pipes;
-using System.Runtime.Intrinsics.X86;
+using System.Text;
 using System.Threading;
-using BenchmarkDotNet.Columns;
-using Microsoft.CodeAnalysis.CSharp.Syntax;
-using System.Formats.Asn1;
-using System.Numerics;
-using System.ComponentModel;
-using System.Collections;
-using System.CodeDom;
+using Toml.Runtime;
+using static System.Char;
 #pragma warning disable IDE0290
 
 
@@ -52,11 +38,10 @@ internal class Program
         Console.WriteLine("Test3 | fruit.orange.color: " + root["fruit"]["orange"]["color"]);
         */
 
-        using FileStream fs = new("C:/Users/BAGOLY/Desktop/ab.txt", FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan);
+        using FileStream fs = new("C:/Users/BAGOLY/Desktop/numbertests.txt", FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan);
 
         TOMLTokenizer t = new(fs);
-
-        t.TokenizeFile();
+        _ = t.TokenizeFile();
 
         Console.ForegroundColor = ConsoleColor.Red;
         foreach (var msg in t.TempErrorLogger.Value)
@@ -66,15 +51,21 @@ internal class Program
         List<string> output = new(3);
         Console.OutputEncoding = Encoding.UTF8;
         foreach (var token in t.TokenStream)
-            if (token.TokenType is TOMLTokenType.String)
-            {   
-                if(token.Metadata.HasFlag(TOMLTokenMetadata.Literal))
-                    Console.WriteLine("Type string, value: \"" + token.Payload + "\"");
-                else
-                    Console.WriteLine("Type string, value: '" + token.Payload + "'");
-            }
+        {
+            if (token.TokenType is TOMLTokenType.Integer or TOMLTokenType.Float)
+                Console.WriteLine(token);
+        }
     }
 
+    public static Stream GenerateStreamFromString(string s)
+    {
+        MemoryStream stream = new();
+        StreamWriter writer = new(stream);
+        writer.Write(s);
+        writer.Flush();
+        stream.Position = 0;
+        return stream;
+    }
 
     private static IEnumerable<(int start, int end)> GetKey(string str)
     {
@@ -138,18 +129,6 @@ internal class Program
                 containingTable = subtable;
             }
         }
-    }
-
-
-
-    private static void SkipWhiteSpace(string s, ref int i)
-    {
-        if (s is "")
-            return;
-
-        while (s[i++] is '\t' or ' ') ;
-
-        i -= 1;
     }
 }
 
@@ -232,7 +211,6 @@ sealed class TOMLTokenizer
 
         char readResult = Reader.ReadSkip(true);
         //Console.WriteLine("Main: read result: " + readResult);
-
         switch (readResult)
         {
             case EOF: return; //Empty source file
@@ -254,20 +232,27 @@ sealed class TOMLTokenizer
     private void TokenizeComment()
     {
         //Control is passed to this method when Tokenize() encounters a '#' character.
-        //The '#' character is consumed!
-        char c;
-
-        while ((c = Reader.ReadSkip()) is not EOF)
+        //The '#' character is already consumed!
+        char c = Reader.Peek();
+        ValueStringBuilder vsb = new(stackalloc char[128]);
+        while (!Reader.MatchLineEnding())
         {
-            if (IsControl(c) && c is not Tab)
+            c = Reader.Read();
+
+            if (c is EOF)
+                break;
+
+            if (c is not Tab && IsControl(c))
             {
-                TempErrorLogger.Value.Add("Tab is the only control character valid inside a comment.");
+                TempErrorLogger.Value.Add("Tab is the only control character valid inside comments.");
                 Synchronize(LF);
             }
 
-            if (c is LF)
-                break;
+            else
+                vsb.Append(c);
         }
+
+        TokenStream.Enqueue(new(TOMLTokenType.Comment, Reader.Line, Reader.Column, vsb.RawChars));
     }
 
     private void TokenizeTable()
@@ -329,16 +314,17 @@ sealed class TOMLTokenizer
             Synchronize(LF);
         }
 
+
         TokenizeValue();
 
 
-
-        if (Reader.PeekSkip() is not (CR or LF or EOF or Comment))
+        if (Reader.PeekSkip() is not (EOF or Comment) && !Reader.MatchLineEnding())
         {
+
             TempErrorLogger.Value.Add("Found trailing characters after keyvaluepair.");
 
             Console.WriteLine("Rest: " + Reader.BaseReader.ReadToEnd());
-
+            Console.ReadKey();
             Synchronize(LF);
         }
     }
@@ -370,7 +356,7 @@ sealed class TOMLTokenizer
         //Control is passed to this method from TokenizeKey() for each key fragment.
 
         char c = Reader.PeekSkip();
-        Console.WriteLine("Fragment started, read: " + c);
+        //Console.WriteLine("Fragment started, read: " + c);
         if (c is EOF)
         {
             TempErrorLogger.Value.Add("Expected fragment but the end of file was reached");
@@ -398,7 +384,7 @@ sealed class TOMLTokenizer
         }
         finally { vsb.Dispose(); }
 
-        Console.WriteLine("Fragment finished, key: " + TokenStream.Last().Payload);
+        //Console.WriteLine("Fragment finished, key: " + TokenStream.Last().Payload);
     }
 
 
@@ -429,11 +415,11 @@ sealed class TOMLTokenizer
         //Control is passed to this method from TokenizeArray() or TokenizeKeyValuePair()
         //No characters are consumed, including leading double quotes for strings.
 
-        ValueStringBuilder buffer = new(stackalloc char[64]);
-
+        ValueStringBuilder buffer = new(stackalloc char[128]);
         try
         {
-            switch (Reader.PeekSkip())
+            Reader.SkipWhiteSpace();
+            switch (Reader.Peek())
             {
                 case DoubleQuote:
                     switch (Reader.MatchCount(DoubleQuote))
@@ -482,8 +468,17 @@ sealed class TOMLTokenizer
 
                 case SquareOpen:
                     TokenizeArray();
-                    break;
+                    return;
 
+                case 't' or 'f': //Bool is added on call-site because the allocated stack is very small (at most 5*2 bytes) and short-lived.
+                    TokenizeBool();
+                    return;
+
+                case >= '0' and <= '9': //decimals
+                case 'i' or 'n':        //Infinity and NaN
+                case '+' or '-':        //Optional sign
+                    TokenizeNumber(ref buffer);
+                    return;
                 default:
                     TempErrorLogger.Value.Add($"Could find a parse method for value token {Reader.PeekSkip()}");
                     Synchronize(LF);
@@ -573,16 +568,16 @@ sealed class TOMLTokenizer
 
                         case 3: //Exactly 3 doublequotes, terminate.
                             return;
-                        
+
                         case 4: //4 doublequotes, append 1 then Terminate.
                             vsb.Append(DoubleQuote);
                             return;
-                        
+
                         case 5: //5 doublequotes, append 2 then Terminate.
                             vsb.Append(DoubleQuote);
                             vsb.Append(DoubleQuote);
                             return;
-                        
+
                         default:
                             TempErrorLogger.Value.Add($"Stray doublequotes.");
                             Synchronize(LF);
@@ -708,22 +703,275 @@ sealed class TOMLTokenizer
         //Control chars other than tab are not permitted inside literal strings.
     }
 
-   
-    private void TokenizeInteger()
-    {
 
+    private void TokenizeInteger(ref ValueStringBuilder vsb, TOMLTokenMetadata format)
+    {
+        char c;
+        bool underScore = false;
+
+        switch (format)
+        {
+            case TOMLTokenMetadata.Hex: TokenizeHexadecimal(ref vsb); break;
+            case TOMLTokenMetadata.Binary: TokenizeBinary(ref vsb); break;
+            case TOMLTokenMetadata.Octal: TokenizeOctal(ref vsb); break;
+            case TOMLTokenMetadata.None: TokenizeDecimal(ref vsb); break;
+            default: throw new ArgumentException("If this got thrown, I'm a fucking idiot."); //Internal usage rules *should* prevent this from triggering. Times this got thrown counter: [0]
+        }
+
+        if (vsb.RawChars[^1] is '_')
+        {
+            TempErrorLogger.Value.Add("Numbers cannot end on an underscore.");
+            Synchronize(LF);
+            return;
+        }
+
+        void TokenizeOctal(ref ValueStringBuilder vsb)
+        {
+            Reader.Read(); //Skip prefix char
+            while ((c = Reader.Peek()) is >= '0' and <= '7' || c is '_')
+            {
+                if (underScore && c is '_')
+                {
+                    TempErrorLogger.Value.Add("Underscores in numbers must have digits on both sides.");
+                    Synchronize(LF);
+                    return;
+                }
+
+                underScore = c is '_';
+                vsb.Append(c);
+                _ = Reader.Read();
+            }
+        }
+
+        void TokenizeBinary(ref ValueStringBuilder vsb)
+        {
+            Reader.Read(); //Skip prefix char
+            while ((c = Reader.Peek()) is '0' or '1' || c is '_')
+            {
+                if (underScore && c is '_')
+                {
+                    TempErrorLogger.Value.Add("Underscores in numbers must have digits on both sides.");
+                    Synchronize(LF);
+                    return;
+                }
+
+                underScore = c is '_';
+                vsb.Append(c);
+                _ = Reader.Read();
+            }
+        }
+
+        void TokenizeHexadecimal(ref ValueStringBuilder vsb)
+        {
+            Reader.Read(); //Skip prefix char
+            while (IsAsciiHexDigit(c = Reader.Peek()) || c is '_')
+            {
+                if (underScore && c is '_')
+                {
+                    TempErrorLogger.Value.Add("Underscores in numbers must have digits on both sides.");
+                    Synchronize(LF);
+                    return;
+                }
+
+                underScore = c is '_';
+                vsb.Append(c);
+                _ = Reader.Read();
+            }
+        }
     }
 
-
-    private void TokenizeFloat()
+    private void TokenizeDecimal(ref ValueStringBuilder vsb)
     {
+        char c;
+        bool underScore = false;
 
+        while (IsAsciiDigit(c = Reader.Peek()) || c is '_')
+        {
+            if (underScore && c is '_')
+            {
+                TempErrorLogger.Value.Add("Underscores in numbers must have digits on both sides.");
+                Synchronize(LF);
+                return;
+            }
+
+            underScore = c is '_';
+            vsb.Append(c);
+            _ = Reader.Read();
+        }
+    }
+
+    private void TokenizeNumber(ref ValueStringBuilder vsb)
+    {
+        char c = Reader.Read();
+        bool? isNegative = c == '-' ? true : c == '+' ? false : null; //true -> negative; false -> positive; null -> no prefix
+
+        if (isNegative != null)//consume + or -
+            c = Reader.Read();
+
+        if (c is '0') //Prefixed nums, leading zero check
+        {
+            switch (Reader.Peek())
+            {
+                case >= '0' and <= '9':
+                    TempErrorLogger.Value.Add("Only prefixed numbers and exponents can contain leading zeros.");
+                    Synchronize(LF);
+                    return;
+
+                case 'x' or 'b' or 'o' when isNegative is not null:
+                    TempErrorLogger.Value.Add($"Prefixed numbers may not start with {(isNegative is true ? '-' : '+')}.");
+                    Synchronize(LF);
+                    return;
+
+                case 'x':
+                    TokenizeInteger(ref vsb, TOMLTokenMetadata.Hex);
+                    TokenStream.Enqueue(new(TOMLTokenType.Integer, Reader.Line, Reader.Column, vsb.RawChars, TOMLTokenMetadata.Hex));
+                    return;
+
+                case 'b':
+                    TokenizeInteger(ref vsb, TOMLTokenMetadata.Binary);
+                    TokenStream.Enqueue(new(TOMLTokenType.Integer, Reader.Line, Reader.Column, vsb.RawChars, TOMLTokenMetadata.Binary));
+                    return;
+
+                case 'o':
+                    TokenizeInteger(ref vsb, TOMLTokenMetadata.Octal);
+                    TokenStream.Enqueue(new(TOMLTokenType.Integer, Reader.Line, Reader.Column, vsb.RawChars, TOMLTokenMetadata.Octal));
+                    return;
+
+                case '.':
+                    if (isNegative != null)
+                        vsb.Append(isNegative is true ? '-' : '+');
+                    vsb.Append('0');
+                    goto FRAC;
+
+                default:
+                    TokenStream.Enqueue(new(TOMLTokenType.Integer, Reader.Line, Reader.Column, ['0']));
+                    return;
+            }
+        }
+
+        else if (IsAsciiDigit(c)) //Decimal number
+        {
+            if (isNegative != null)
+                vsb.Append(isNegative is true ? '-' : '+');
+
+            vsb.Append(c); //Append the originally read character
+
+            TokenizeInteger(ref vsb, TOMLTokenMetadata.None);
+
+            if (Reader.Peek() is not ('.' or 'e' or 'E')) //Decimal integer
+            {
+                TokenStream.Enqueue(new(TOMLTokenType.Integer, Reader.Line, Reader.Column, vsb.RawChars));
+                return;
+            }
+        }
+
+
+        else if (c is 'i') //Infinity
+        {
+            if (!Reader.MatchNext('n') || !Reader.MatchNext('f'))
+            {
+                TempErrorLogger.Value.Add("Expected literal 'inf'.");
+                Synchronize(LF);
+            }
+
+            else
+            {
+                if (isNegative != null)
+                    vsb.Append(isNegative is true ? '-' : '+');
+                vsb.Append("inf".AsSpan());
+                TokenStream.Enqueue(new(TOMLTokenType.Float, Reader.Line, Reader.Column, vsb.RawChars, TOMLTokenMetadata.FloatInf));
+            }
+
+            return;
+        }
+
+
+        else if (c is 'n') //NaN
+        {
+            if (!Reader.MatchNext('a') || !Reader.MatchNext('n'))
+            {
+                TempErrorLogger.Value.Add("Expected literal 'nan'.");
+                Synchronize(LF);
+            }
+
+            else
+            {
+                if (isNegative != null)
+                    vsb.Append(isNegative is true ? '-' : '+');
+                vsb.Append("nan".AsSpan());
+                TokenStream.Enqueue(new(TOMLTokenType.Float, Reader.Line, Reader.Column, vsb.RawChars, TOMLTokenMetadata.FloatNan));
+            }
+
+            return;
+        }
+
+    FRAC:                   //Jump is for zero, eg. 0.5 or 0.123e-2
+        switch (Reader.Read()) //Float
+        {
+            case '.': //Fractional
+                if (!IsAsciiDigit(Reader.Peek()))
+                {
+                    TempErrorLogger.Value.Add("Decimal points must have digits on both sides.");
+                    Synchronize(LF);
+                    return;
+                }
+
+                vsb.Append('.');
+
+                TokenizeDecimal(ref vsb);  //The fractional part is "a decimal point followed by one or more digits."
+
+                if (Reader.Peek() is 'e' or 'E')//an exponent part may follow a fractional part
+                    goto case 'e';
+
+                TokenStream.Enqueue(new(TOMLTokenType.Float, Reader.Line, Reader.Column, vsb.RawChars));
+                return;
+
+            case 'E': //Exponent
+            case 'e':
+                if (Reader.Peek() is 'e' or 'E')
+                    Reader.Read();
+
+                vsb.Append('e'); //Add and consume 'e'. Normalize exponent to lowercase
+
+                if (Reader.MatchNext('-'))
+                    vsb.Append('-');
+
+                else if (Reader.MatchNext('+'))
+                    vsb.Append('+');
+
+                TokenizeDecimal(ref vsb);    //The exponent part "follows the same rules as decimal integer values but may include leading zeroes."
+                TokenStream.Enqueue(new(TOMLTokenType.Float, Reader.Line, Reader.Column, vsb.RawChars, TOMLTokenMetadata.FloatHasExponent));
+                return;
+        }
     }
 
 
     private void TokenizeBool()
     {
+        if (Reader.Peek() is 't')
+        {
+            Span<char> bufferT = stackalloc char[4];
 
+            if (Reader.BaseReader.ReadBlock(bufferT) != 4 || bufferT is not "true")
+            {
+                TempErrorLogger.Value.Add($"Expected Boolean value 'true' but found {bufferT.ToString()}");
+                Synchronize(LF);
+                return;
+            }
+            TokenStream.Enqueue(new(TOMLTokenType.Bool, Reader.Line, Reader.Column, bufferT));
+            return;
+        }
+
+        Span<char> bufferF = stackalloc char[5];
+        if (Reader.BaseReader.ReadBlock(bufferF) != 5 || bufferF is not "false")
+        {
+            TempErrorLogger.Value.Add($"Expected Boolean value 'false' but found {bufferF.ToString()}");
+            Synchronize(LF);
+            return;
+        }
+
+        TokenStream.Enqueue(new(TOMLTokenType.Bool, Reader.Line, Reader.Column, bufferF));
+        return;
     }
 
     private void TokenizeDateTime()
@@ -835,8 +1083,6 @@ sealed class TOMLTokenizer
     }
 
 
-
-
     private static bool IsBareKey(char c) => IsAsciiLetter(c) || IsAsciiDigit(c) || c is '-' or '_';
     private static bool IsKey(char c) => IsBareKey(c) || c is '"' or '\'';
     /*private static TTable ResolveKey(TTable root, in ReadOnlySpan<char> str)
@@ -912,6 +1158,9 @@ enum TOMLTokenMetadata
     Hex = 128,
     Octal = 256,
     Binary = 512,
+    FloatInf = 1024,
+    FloatNan = 2048,
+    FloatHasExponent = 4096,
 }
 
 
