@@ -1,26 +1,12 @@
 ﻿global using System;
-using static System.Char;
-using Toml.Runtime;
-using System.Runtime.CompilerServices;
 using System.Collections.Generic;
-using System.Buffers;
 using System.Diagnostics;
-using System.Runtime.InteropServices;
 using System.IO;
-using System.Text;
-using System.Collections.Frozen;
-using System.Text.Json;
 using System.Linq;
-using System.IO.Pipes;
-using System.Runtime.Intrinsics.X86;
+using System.Text;
 using System.Threading;
-using BenchmarkDotNet.Columns;
-using Microsoft.CodeAnalysis.CSharp.Syntax;
-using System.Formats.Asn1;
-using System.Numerics;
-using System.ComponentModel;
-using System.Collections;
-using System.CodeDom;
+using Toml.Runtime;
+using static System.Char;
 #pragma warning disable IDE0290
 
 
@@ -51,12 +37,11 @@ internal class Program
         Console.WriteLine("Test2 | animal.lifespan: " + root["animal"]["lifespan"]);
         Console.WriteLine("Test3 | fruit.orange.color: " + root["fruit"]["orange"]["color"]);
         */
-        
-        using FileStream fs = new("C:/Users/BAGOLY/Desktop/ab.txt", FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan);
+
+        using FileStream fs = new("C:/Users/BAGOLY/Desktop/numbertests.txt", FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan);
 
         TOMLTokenizer t = new(fs);
-
-        t.TokenizeFile();
+        _ = t.TokenizeFile();
 
         Console.ForegroundColor = ConsoleColor.Red;
         foreach (var msg in t.TempErrorLogger.Value)
@@ -66,9 +51,20 @@ internal class Program
         List<string> output = new(3);
         Console.OutputEncoding = Encoding.UTF8;
         foreach (var token in t.TokenStream)
-            if (token.TokenType is TOMLTokenType.String)
-                Console.WriteLine("Type string, value: '" + token.Payload + "'");
-        //StreamReader sr = new("C:\\Users\\BAGOLY\\Desktop\\a.txt");
+        {
+            if (token.TokenType is TOMLTokenType.Integer or TOMLTokenType.Float)
+                Console.WriteLine(token);
+        }
+    }
+
+    public static Stream GenerateStreamFromString(string s)
+    {
+        MemoryStream stream = new();
+        StreamWriter writer = new(stream);
+        writer.Write(s);
+        writer.Flush();
+        stream.Position = 0;
+        return stream;
     }
 
     private static IEnumerable<(int start, int end)> GetKey(string str)
@@ -134,18 +130,6 @@ internal class Program
             }
         }
     }
-
-
-
-    private static void SkipWhiteSpace(string s, ref int i)
-    {
-        if (s is "")
-            return;
-
-        while (s[i++] is '\t' or ' ') ;
-
-        i -= 1;
-    }
 }
 
 sealed class TOMLTokenizer
@@ -156,6 +140,7 @@ sealed class TOMLTokenizer
     internal const char Space = ' ';
     internal const char CR = '\r';
     internal const char LF = '\n';
+    internal const char BackSlash = '\\';
     internal const char Comment = '#';
     internal const char DoubleQuote = '"';
     internal const char SingleQuote = '\'';
@@ -226,7 +211,6 @@ sealed class TOMLTokenizer
 
         char readResult = Reader.ReadSkip(true);
         //Console.WriteLine("Main: read result: " + readResult);
-
         switch (readResult)
         {
             case EOF: return; //Empty source file
@@ -248,20 +232,27 @@ sealed class TOMLTokenizer
     private void TokenizeComment()
     {
         //Control is passed to this method when Tokenize() encounters a '#' character.
-        //The '#' character is consumed!
-        char c;
-
-        while ((c = Reader.ReadSkip()) is not EOF)
+        //The '#' character is already consumed!
+        char c = Reader.Peek();
+        ValueStringBuilder vsb = new(stackalloc char[128]);
+        while (!Reader.MatchLineEnding())
         {
-            if (IsControl(c) && c is not Tab)
+            c = Reader.Read();
+
+            if (c is EOF)
+                break;
+
+            if (c is not Tab && IsControl(c))
             {
-                TempErrorLogger.Value.Add("Tab is the only control character valid inside a comment.");
+                TempErrorLogger.Value.Add("Tab is the only control character valid inside comments.");
                 Synchronize(LF);
             }
 
-            if (c is LF)
-                break;
+            else
+                vsb.Append(c);
         }
+
+        TokenStream.Enqueue(new(TOMLTokenType.Comment, Reader.Line, Reader.Column, vsb.RawChars));
     }
 
     private void TokenizeTable()
@@ -323,15 +314,17 @@ sealed class TOMLTokenizer
             Synchronize(LF);
         }
 
+
         TokenizeValue();
 
 
-        if (Reader.PeekSkip() is not (CR or LF or EOF or Comment))
+        if (Reader.PeekSkip() is not (EOF or Comment) && !Reader.MatchLineEnding())
         {
+
             TempErrorLogger.Value.Add("Found trailing characters after keyvaluepair.");
 
             Console.WriteLine("Rest: " + Reader.BaseReader.ReadToEnd());
-
+            Console.ReadKey();
             Synchronize(LF);
         }
     }
@@ -363,7 +356,7 @@ sealed class TOMLTokenizer
         //Control is passed to this method from TokenizeKey() for each key fragment.
 
         char c = Reader.PeekSkip();
-        Console.WriteLine("Fragment started, read: " + c);
+        //Console.WriteLine("Fragment started, read: " + c);
         if (c is EOF)
         {
             TempErrorLogger.Value.Add("Expected fragment but the end of file was reached");
@@ -391,7 +384,7 @@ sealed class TOMLTokenizer
         }
         finally { vsb.Dispose(); }
 
-        Console.WriteLine("Fragment finished, key: " + TokenStream.Last().Payload);
+        //Console.WriteLine("Fragment finished, key: " + TokenStream.Last().Payload);
     }
 
 
@@ -422,46 +415,76 @@ sealed class TOMLTokenizer
         //Control is passed to this method from TokenizeArray() or TokenizeKeyValuePair()
         //No characters are consumed, including leading double quotes for strings.
 
-        //A note on peeknext: it is currently fucked, but touching it might fuck up other parts of
-        //the code. It currently consumes on a match, so the first ' or " is already consumed.
-
-        ValueStringBuilder buffer = new(stackalloc char[64]);
-
+        ValueStringBuilder buffer = new(stackalloc char[128]);
         try
         {
-            switch (Reader.PeekSkip())
+            Reader.SkipWhiteSpace();
+            switch (Reader.Peek())
             {
-                case DoubleQuote when Reader.MatchNext(DoubleQuote):
-                    TokenizeMultiLineString(ref buffer);
-                    TokenStream.Enqueue(new(TOMLTokenType.String, Reader.Line, Reader.Column, buffer.RawChars, TOMLTokenMetadata.Multiline));
-                    break;
-
                 case DoubleQuote:
-                    TokenizeString(ref buffer);
-                    TokenStream.Enqueue(new(TOMLTokenType.String, Reader.Line, Reader.Column, buffer.RawChars));
-                    break;
-
-                case SingleQuote when Reader.MatchNext(SingleQuote):
-                    TokenizeLiteralMultiLineString(ref buffer);
-                    TokenStream.Enqueue(new(TOMLTokenType.String, Reader.Line, Reader.Column, buffer.RawChars, TOMLTokenMetadata.MultilineLiteral));
+                    switch (Reader.MatchCount(DoubleQuote))
+                    {
+                        case 1: //One doublequote; basic string
+                            TokenizeString(ref buffer);
+                            TokenStream.Enqueue(new(TOMLTokenType.String, Reader.Line, Reader.Column, buffer.RawChars));
+                            break;
+                        case 2: //Two doublequotes cannot start any string
+                            TempErrorLogger.Value.Add("Strings cannot start with '\"\"'.");
+                            goto ERR_SYNC;
+                        case >= 3: //Three doublequotes; multiline string
+                            TokenizeMultiLineString(ref buffer);
+                            TokenStream.Enqueue(new(TOMLTokenType.String, Reader.Line, Reader.Column, buffer.RawChars, TOMLTokenMetadata.Multiline));
+                            break;
+                        default:
+                            TempErrorLogger.Value.Add("MatchCount returned an unusual value."); // Currently impossible, MatchCount returns between 0 and int.MaxValue
+                        ERR_SYNC:
+                            Synchronize(LF);
+                            return;
+                    }
                     break;
 
                 case SingleQuote:
-                    TokenizeLiteralString(ref buffer);
-                    TokenStream.Enqueue(new(TOMLTokenType.String, Reader.Line, Reader.Column, buffer.RawChars, TOMLTokenMetadata.Literal));
+                    switch (Reader.MatchCount(SingleQuote))
+                    {
+                        case 1: //One singlequote; basic literal string
+                            TokenizeLiteralString(ref buffer);
+                            TokenStream.Enqueue(new(TOMLTokenType.String, Reader.Line, Reader.Column, buffer.RawChars, TOMLTokenMetadata.Literal));
+                            break;
+                        case 2: //Two singlequotes cannot start any string
+                            TempErrorLogger.Value.Add("Literal strings cannot start with \"''\".");
+                            goto ERR_SYNC;
+                        case >= 3: //Three singlequotes; multiline literal string
+                            TokenizeMultiLineLiteralString(ref buffer);
+                            TokenStream.Enqueue(new(TOMLTokenType.String, Reader.Line, Reader.Column, buffer.RawChars, TOMLTokenMetadata.MultilineLiteral));
+                            break;
+                        default:
+                            TempErrorLogger.Value.Add("MatchCount returned an unusual value."); // Currently impossible, MatchCount returns between 0 and int.MaxValue
+                        ERR_SYNC:
+                            Synchronize(LF);
+                            return;
+
+                    }
                     break;
 
                 case SquareOpen:
                     TokenizeArray();
-                    break;
+                    return;
 
+                case 't' or 'f': //Bool is added on call-site because the allocated stack is very small (at most 5*2 bytes) and short-lived.
+                    TokenizeBool();
+                    return;
+
+                case >= '0' and <= '9': //decimals
+                case 'i' or 'n':        //Infinity and NaN
+                case '+' or '-':        //Optional sign
+                    TokenizeNumber(ref buffer);
+                    return;
                 default:
                     TempErrorLogger.Value.Add($"Could find a parse method for value token {Reader.PeekSkip()}");
                     Synchronize(LF);
                     return;
             }
         }
-
         finally { buffer.Dispose(); }
     }
 
@@ -472,31 +495,41 @@ sealed class TOMLTokenizer
     }
 
 
-    private void TokenizeString(ref ValueStringBuilder vsb) //TODO: escape sequences, enforce one-line only
+    private void TokenizeString(ref ValueStringBuilder vsb)
     {
         char c;
         while ((c = Reader.Read()) is not (EOF or DoubleQuote))
         {
-            if (c is LF || c is CR && Reader.Peek() is LF)
+            switch (c)
             {
-                TempErrorLogger.Value.Add("Basic strings cannot span multiple lines. Newline was removed.");
-            }
+                case CR or LF:
+                    if (Reader.MatchLineEnding())
+                    {
+                        TempErrorLogger.Value.Add("Basic strings cannot span multiple lines.");
+                        Synchronize(LF);
+                        return;
+                    }
+                    break;
 
-            else if (c is '\\')
-            {
-                if (Reader.Peek() is Space)
-                {
-                    TempErrorLogger.Value.Add("Only multiline strings can contain line ending backslashes.");
-                    Synchronize(LF);
-                    return;
-                }
-                EscapeSequence(ref vsb);
-            }
+                case BackSlash:
+                    if (Reader.Peek() is Space)
+                    {
+                        TempErrorLogger.Value.Add("Only multiline strings can contain line ending backslashes.");
+                        Synchronize(LF);
+                        return;
+                    }
+                    EscapeSequence(ref vsb);
+                    break;
 
-            else
-                vsb.Append(c);
+                case not Tab when IsControl(c):
+                    TempErrorLogger.Value.Add("Control characters other than Tab (U+0009) must be escaped.");
+                    break;
+
+                default:
+                    vsb.Append(c);
+                    break;
+            }
         }
-
 
         if (c is not DoubleQuote)
         {
@@ -505,143 +538,160 @@ sealed class TOMLTokenizer
             return;
         }
 
-        //string is added in TokenizeValue(), DO NOT ADD ANYTHING HERE.
+        //The string itself is added in TokenizeValue(), DO NOT TRY TO ADD OR RETURN ANYTHING HERE.
         //This is so that only one ValueStringBuilder is allocated.
     }
 
     private void TokenizeMultiLineString(ref ValueStringBuilder vsb)
     {
-        //When control is passed to this method, the first " is already consumed.
-
-        if (!Reader.MatchNext(DoubleQuote) || !Reader.MatchNext(DoubleQuote))
-        {
-            TempErrorLogger.Value.Add("Multiline strings must start with '\"\"\"'");
-            Synchronize(LF);
-            return;
-        }
-
-        if (Reader.Peek() is LF || Reader.Peek() is CR && Reader.PeekNext() is LF) //Skip newline if immediately after delimiter
-            Reader.Read();
+        Reader.MatchLineEnding(); //Skip newline if immediately after opening delimiter (as defined by spec)
 
         char c;
+
         while ((c = Reader.Read()) is not EOF)
         {
-            if (c is DoubleQuote) //Found doublequote
+            switch (c)
             {
-                if (CheckStringTerminate(ref vsb))
-                    return;
+                case DoubleQuote:
+                    switch (Reader.MatchCount(DoubleQuote) + 1) //The number of doublequotes plus the first
+                    {
+                        case 1: //Only one 1 doublequote, in 'c'
+                            vsb.Append(DoubleQuote);
+                            continue;
 
-                else
-                {
-                    Reader.Read();//idk anymore but it works. Basically, CheckStringTerminate consumed one less doublequote
-                    continue;
-                }
-            }
+                        case 2: //Two doublequotes, not terminating.
+                            vsb.Append(DoubleQuote);
+                            vsb.Append(DoubleQuote);
+                            continue;
 
-            if (c is '\\')
-            {
-                if (Reader.Peek() is LF || Reader.Peek() is CR && Reader.PeekNext() is LF) //If line ending backlash
-                {
-                    c = Reader.ReadSkip(true); //Skip all whitespace and newlines, load next char
-                    if (c is DoubleQuote)      //Edge case; happens when the string immediately terminates after the backslash
-                        if (CheckStringTerminate(ref vsb))
+                        //From here on out, it's definitely terminating, just need to decide how many to add, if any.
+
+                        case 3: //Exactly 3 doublequotes, terminate.
                             return;
 
-                    vsb.Append(c);            //A bit convoluted; code like this so the while loop wouldn't need modification
-                    continue;
-                }
+                        case 4: //4 doublequotes, append 1 then Terminate.
+                            vsb.Append(DoubleQuote);
+                            return;
 
-                else
-                {
-                    //Console.WriteLine("before  seq: " + (int)Reader.Peek());
-                    EscapeSequence(ref vsb);
-                    //Console.WriteLine("ret from seq: " + (int)Reader.Peek());
-                }
+                        case 5: //5 doublequotes, append 2 then Terminate.
+                            vsb.Append(DoubleQuote);
+                            vsb.Append(DoubleQuote);
+                            return;
+
+                        default:
+                            TempErrorLogger.Value.Add($"Stray doublequotes.");
+                            Synchronize(LF);
+                            return;
+                    }
+
+                case CR when Reader.Peek() is LF: //Normalize to LF
+                    vsb.Append(LF);
+                    Reader.Read(); //Consume LF
+                    break;
+
+                case BackSlash:
+                    if (Reader.MatchLineEnding()) //If line ending backlash
+                    {
+                        Reader.SkipWhiteSpace(true);
+                        continue;
+                    }
+
+                    else
+                        EscapeSequence(ref vsb);
+                    break;
+
+                default:
+                    vsb.Append(c);
+                    break;
             }
+        }
+
+        TempErrorLogger.Value.Add("Unterminated string");
+        Synchronize(LF);
+        return;
+    }
+
+    private void TokenizeLiteralString(ref ValueStringBuilder vsb)
+    {
+        char c;
+        while ((c = Reader.Read()) is not (EOF or SingleQuote))
+        {
+            if (Reader.MatchLineEnding())
+                TempErrorLogger.Value.Add("Literal strings cannot span multiple lines. Newline was removed.");
+
+            else if (c is not Tab && IsControl(c))
+                TempErrorLogger.Value.Add("Literal strings cannot contain control characters other than Tab (U+0009)");
 
             else
                 vsb.Append(c);
         }
 
 
-        /*if (c is not DoubleQuote || !Reader.MatchNext(DoubleQuote) || !Reader.MatchNext(DoubleQuote))
+        if (c is not SingleQuote)
         {
-            TempErrorLogger.Value.Add("Unterminated string");
+            TempErrorLogger.Value.Add("Unterminated literal string");
             Synchronize(LF);
             return;
-        }*/
-
-
-
-        //The standard on multiline basic strings: 
-        /* 
-           Multi-line basic strings are surrounded by three quotation marks 
-           on each side and allow newlines. 
-           
-           A newline immediately following the opening delimiter will be trimmed. 
-           All other whitespace and newline characters remain intact.
-         */
-
-        //so if there is a LF or CRLF after the leading """, remove it. All others are preserved.
-        //also says "feel free to normalize to whatever makes sense for the platform", but preserving might be better
-
-        //there is also a need for a c-style '\' nbsp char. When the last non-wp character
-        //on a line is a single '\', remove ALL wp, including LF and CRLF until the next non-wp character
-        //Escape sequences should still work as well.
-    }
-
-    private bool CheckStringTerminate(ref ValueStringBuilder vsb)
-    {
-
-        if (Reader.Peek() is not DoubleQuote)
-        {
-            vsb.Append(DoubleQuote);
-            return false;
         }
 
-        else
+        //The string itself is added in TokenizeValue(), DO NOT TRY TO ADD OR RETURN ANYTHING HERE.
+        //This is so that only one ValueStringBuilder is allocated.
+    }
+
+    private void TokenizeMultiLineLiteralString(ref ValueStringBuilder vsb)
+    {
+        Reader.MatchLineEnding(); //Skip newline if immediately after opening delimiter (as defined by spec)
+
+        char c;
+
+        while ((c = Reader.Read()) is not EOF)
         {
-            Reader.Read();
-            if (Reader.Peek() is not DoubleQuote)
+            switch (c)
             {
-                vsb.Append(DoubleQuote);
-                vsb.Append(DoubleQuote);
-                return false;
+                case SingleQuote:
+                    switch (Reader.MatchCount(SingleQuote) + 1) //The number of singlequotes plus the first
+                    {
+                        case 1: //Only one 1 singlequotes, in 'c'
+                            vsb.Append(SingleQuote);
+                            continue;
+                        case 2: //Two singlequotes, not terminating.
+                            vsb.Append(SingleQuote);
+                            vsb.Append(SingleQuote);
+                            continue;
+                        //From here on out, it's definitely terminating, just need to decide how many to add, if any.
+                        case 3: //Exactly 3 singlequotes, terminate.
+                            return;
+                        case 4: //4 singlequotes, append 1 then Terminate.
+                            vsb.Append(SingleQuote);
+                            return;
+                        case 5: //5 singlequotes, append 2 then Terminate.
+                            vsb.Append(SingleQuote);
+                            vsb.Append(SingleQuote);
+                            return;
+                        default:
+                            TempErrorLogger.Value.Add($"Stray singlequotes.");
+                            Synchronize(LF);
+                            return;
+                    }
+
+                case CR when Reader.Peek() is LF: //Normalize CRLF to LF
+                    vsb.Append(LF);
+                    Reader.Read(); //Consume LF
+                    break;
+
+                case not Tab when IsControl(c):
+                    TempErrorLogger.Value.Add("Literal strings cannot contain control characters other than Tab (U+0009)");
+                    break;
+
+                default:
+                    vsb.Append(c);
+                    break;
             }
-
-            else
-            {
-                Synchronize(LF);
-                return true;
-            }
         }
-    }
 
-    private void TokenizeLiteralString(ref ValueStringBuilder vsb)
-    {
-        if (!Reader.MatchNextSkip(SingleQuote))
-        {
-            TempErrorLogger.Value.Add("Basic strings must start with a '\"'");
-            Synchronize(LF);
-            return;
-        }
-        //When control is passed to this method, the leading singlequote is already consumed
-
-        //Literal strings are one-line only, like basic strings.
-        //As the name implies there is no escaping, all chars are tokenized as is.
-
-        //Control chars other than tab are not permitted inside literal strings.
-    }
-
-    private void TokenizeLiteralMultiLineString(ref ValueStringBuilder vsb)
-    {
-
-        if (!Reader.MatchNextSkip(SingleQuote) || !Reader.MatchNextSkip(SingleQuote))
-        {
-            TempErrorLogger.Value.Add("Multiline literal strings must start with \"'''\"");
-            Synchronize(LF);
-            return;
-        }
+        TempErrorLogger.Value.Add("Unterminated string");
+        Synchronize(LF);
+        return;
 
         //Like literal strings tHeRe Is No EsCaPe-ing; however, newlines are allowed.
         //If there is a LF or CRLF after the leading ''', it will be removed.
@@ -653,21 +703,275 @@ sealed class TOMLTokenizer
         //Control chars other than tab are not permitted inside literal strings.
     }
 
-    private void TokenizeInteger()
-    {
 
+    private void TokenizeInteger(ref ValueStringBuilder vsb, TOMLTokenMetadata format)
+    {
+        char c;
+        bool underScore = false;
+
+        switch (format)
+        {
+            case TOMLTokenMetadata.Hex: TokenizeHexadecimal(ref vsb); break;
+            case TOMLTokenMetadata.Binary: TokenizeBinary(ref vsb); break;
+            case TOMLTokenMetadata.Octal: TokenizeOctal(ref vsb); break;
+            case TOMLTokenMetadata.None: TokenizeDecimal(ref vsb); break;
+            default: throw new ArgumentException("If this got thrown, I'm a fucking idiot."); //Internal usage rules *should* prevent this from triggering. Times this got thrown counter: [0]
+        }
+
+        if (vsb.RawChars[^1] is '_')
+        {
+            TempErrorLogger.Value.Add("Numbers cannot end on an underscore.");
+            Synchronize(LF);
+            return;
+        }
+
+        void TokenizeOctal(ref ValueStringBuilder vsb)
+        {
+            Reader.Read(); //Skip prefix char
+            while ((c = Reader.Peek()) is >= '0' and <= '7' || c is '_')
+            {
+                if (underScore && c is '_')
+                {
+                    TempErrorLogger.Value.Add("Underscores in numbers must have digits on both sides.");
+                    Synchronize(LF);
+                    return;
+                }
+
+                underScore = c is '_';
+                vsb.Append(c);
+                _ = Reader.Read();
+            }
+        }
+
+        void TokenizeBinary(ref ValueStringBuilder vsb)
+        {
+            Reader.Read(); //Skip prefix char
+            while ((c = Reader.Peek()) is '0' or '1' || c is '_')
+            {
+                if (underScore && c is '_')
+                {
+                    TempErrorLogger.Value.Add("Underscores in numbers must have digits on both sides.");
+                    Synchronize(LF);
+                    return;
+                }
+
+                underScore = c is '_';
+                vsb.Append(c);
+                _ = Reader.Read();
+            }
+        }
+
+        void TokenizeHexadecimal(ref ValueStringBuilder vsb)
+        {
+            Reader.Read(); //Skip prefix char
+            while (IsAsciiHexDigit(c = Reader.Peek()) || c is '_')
+            {
+                if (underScore && c is '_')
+                {
+                    TempErrorLogger.Value.Add("Underscores in numbers must have digits on both sides.");
+                    Synchronize(LF);
+                    return;
+                }
+
+                underScore = c is '_';
+                vsb.Append(c);
+                _ = Reader.Read();
+            }
+        }
     }
 
-
-    private void TokenizeFloat()
+    private void TokenizeDecimal(ref ValueStringBuilder vsb)
     {
+        char c;
+        bool underScore = false;
 
+        while (IsAsciiDigit(c = Reader.Peek()) || c is '_')
+        {
+            if (underScore && c is '_')
+            {
+                TempErrorLogger.Value.Add("Underscores in numbers must have digits on both sides.");
+                Synchronize(LF);
+                return;
+            }
+
+            underScore = c is '_';
+            vsb.Append(c);
+            _ = Reader.Read();
+        }
+    }
+
+    private void TokenizeNumber(ref ValueStringBuilder vsb)
+    {
+        char c = Reader.Read();
+        bool? isNegative = c == '-' ? true : c == '+' ? false : null; //true -> negative; false -> positive; null -> no prefix
+
+        if (isNegative != null)//consume + or -
+            c = Reader.Read();
+
+        if (c is '0') //Prefixed nums, leading zero check
+        {
+            switch (Reader.Peek())
+            {
+                case >= '0' and <= '9':
+                    TempErrorLogger.Value.Add("Only prefixed numbers and exponents can contain leading zeros.");
+                    Synchronize(LF);
+                    return;
+
+                case 'x' or 'b' or 'o' when isNegative is not null:
+                    TempErrorLogger.Value.Add($"Prefixed numbers may not start with {(isNegative is true ? '-' : '+')}.");
+                    Synchronize(LF);
+                    return;
+
+                case 'x':
+                    TokenizeInteger(ref vsb, TOMLTokenMetadata.Hex);
+                    TokenStream.Enqueue(new(TOMLTokenType.Integer, Reader.Line, Reader.Column, vsb.RawChars, TOMLTokenMetadata.Hex));
+                    return;
+
+                case 'b':
+                    TokenizeInteger(ref vsb, TOMLTokenMetadata.Binary);
+                    TokenStream.Enqueue(new(TOMLTokenType.Integer, Reader.Line, Reader.Column, vsb.RawChars, TOMLTokenMetadata.Binary));
+                    return;
+
+                case 'o':
+                    TokenizeInteger(ref vsb, TOMLTokenMetadata.Octal);
+                    TokenStream.Enqueue(new(TOMLTokenType.Integer, Reader.Line, Reader.Column, vsb.RawChars, TOMLTokenMetadata.Octal));
+                    return;
+
+                case '.':
+                    if (isNegative != null)
+                        vsb.Append(isNegative is true ? '-' : '+');
+                    vsb.Append('0');
+                    goto FRAC;
+
+                default:
+                    TokenStream.Enqueue(new(TOMLTokenType.Integer, Reader.Line, Reader.Column, ['0']));
+                    return;
+            }
+        }
+
+        else if (IsAsciiDigit(c)) //Decimal number
+        {
+            if (isNegative != null)
+                vsb.Append(isNegative is true ? '-' : '+');
+
+            vsb.Append(c); //Append the originally read character
+
+            TokenizeInteger(ref vsb, TOMLTokenMetadata.None);
+
+            if (Reader.Peek() is not ('.' or 'e' or 'E')) //Decimal integer
+            {
+                TokenStream.Enqueue(new(TOMLTokenType.Integer, Reader.Line, Reader.Column, vsb.RawChars));
+                return;
+            }
+        }
+
+
+        else if (c is 'i') //Infinity
+        {
+            if (!Reader.MatchNext('n') || !Reader.MatchNext('f'))
+            {
+                TempErrorLogger.Value.Add("Expected literal 'inf'.");
+                Synchronize(LF);
+            }
+
+            else
+            {
+                if (isNegative != null)
+                    vsb.Append(isNegative is true ? '-' : '+');
+                vsb.Append("inf".AsSpan());
+                TokenStream.Enqueue(new(TOMLTokenType.Float, Reader.Line, Reader.Column, vsb.RawChars, TOMLTokenMetadata.FloatInf));
+            }
+
+            return;
+        }
+
+
+        else if (c is 'n') //NaN
+        {
+            if (!Reader.MatchNext('a') || !Reader.MatchNext('n'))
+            {
+                TempErrorLogger.Value.Add("Expected literal 'nan'.");
+                Synchronize(LF);
+            }
+
+            else
+            {
+                if (isNegative != null)
+                    vsb.Append(isNegative is true ? '-' : '+');
+                vsb.Append("nan".AsSpan());
+                TokenStream.Enqueue(new(TOMLTokenType.Float, Reader.Line, Reader.Column, vsb.RawChars, TOMLTokenMetadata.FloatNan));
+            }
+
+            return;
+        }
+
+    FRAC:                   //Jump is for zero, eg. 0.5 or 0.123e-2
+        switch (Reader.Read()) //Float
+        {
+            case '.': //Fractional
+                if (!IsAsciiDigit(Reader.Peek()))
+                {
+                    TempErrorLogger.Value.Add("Decimal points must have digits on both sides.");
+                    Synchronize(LF);
+                    return;
+                }
+
+                vsb.Append('.');
+
+                TokenizeDecimal(ref vsb);  //The fractional part is "a decimal point followed by one or more digits."
+
+                if (Reader.Peek() is 'e' or 'E')//an exponent part may follow a fractional part
+                    goto case 'e';
+
+                TokenStream.Enqueue(new(TOMLTokenType.Float, Reader.Line, Reader.Column, vsb.RawChars));
+                return;
+
+            case 'E': //Exponent
+            case 'e':
+                if (Reader.Peek() is 'e' or 'E')
+                    Reader.Read();
+
+                vsb.Append('e'); //Add and consume 'e'. Normalize exponent to lowercase
+
+                if (Reader.MatchNext('-'))
+                    vsb.Append('-');
+
+                else if (Reader.MatchNext('+'))
+                    vsb.Append('+');
+
+                TokenizeDecimal(ref vsb);    //The exponent part "follows the same rules as decimal integer values but may include leading zeroes."
+                TokenStream.Enqueue(new(TOMLTokenType.Float, Reader.Line, Reader.Column, vsb.RawChars, TOMLTokenMetadata.FloatHasExponent));
+                return;
+        }
     }
 
 
     private void TokenizeBool()
     {
+        if (Reader.Peek() is 't')
+        {
+            Span<char> bufferT = stackalloc char[4];
 
+            if (Reader.BaseReader.ReadBlock(bufferT) != 4 || bufferT is not "true")
+            {
+                TempErrorLogger.Value.Add($"Expected Boolean value 'true' but found {bufferT.ToString()}");
+                Synchronize(LF);
+                return;
+            }
+            TokenStream.Enqueue(new(TOMLTokenType.Bool, Reader.Line, Reader.Column, bufferT));
+            return;
+        }
+
+        Span<char> bufferF = stackalloc char[5];
+        if (Reader.BaseReader.ReadBlock(bufferF) != 5 || bufferF is not "false")
+        {
+            TempErrorLogger.Value.Add($"Expected Boolean value 'false' but found {bufferF.ToString()}");
+            Synchronize(LF);
+            return;
+        }
+
+        TokenStream.Enqueue(new(TOMLTokenType.Bool, Reader.Line, Reader.Column, bufferF));
+        return;
     }
 
     private void TokenizeDateTime()
@@ -779,10 +1083,6 @@ sealed class TOMLTokenizer
     }
 
 
-
-
-
-
     private static bool IsBareKey(char c) => IsAsciiLetter(c) || IsAsciiDigit(c) || c is '-' or '_';
     private static bool IsKey(char c) => IsBareKey(c) || c is '"' or '\'';
     /*private static TTable ResolveKey(TTable root, in ReadOnlySpan<char> str)
@@ -858,6 +1158,9 @@ enum TOMLTokenMetadata
     Hex = 128,
     Octal = 256,
     Binary = 512,
+    FloatInf = 1024,
+    FloatNan = 2048,
+    FloatHasExponent = 4096,
 }
 
 
@@ -869,14 +1172,14 @@ readonly record struct TOMLToken : IEquatable<TOMLToken>
 
     internal (int Line, int Column) Position { get; init; }
 
-    internal TOMLTokenMetadata? Metadata { get; init; }
+    internal TOMLTokenMetadata Metadata { get; init; }
 
     public TOMLToken(TOMLTokenType type, int ln, int col, in ReadOnlySpan<char> payload, TOMLTokenMetadata? metadata = null)
     {
         TokenType = type;
         Position = (ln, col);
         Payload = payload == ReadOnlySpan<char>.Empty ? null : payload.ToString();
-        Metadata = metadata;
+        Metadata = metadata ?? TOMLTokenMetadata.None;
     }
 
     public override string ToString()
