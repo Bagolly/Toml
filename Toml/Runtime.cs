@@ -57,7 +57,8 @@ public sealed class TArray : TObject, IEnumerable<TObject>, ITCollection
     public static TArray With(TObject value) => [value];
 
     public static TArray WithMany(params TObject[] values) => new() { Values = [.. values] };
-    
+
+    public static TArray FromList(List<TObject> list) => new() { Values = list };
 
     [SuppressMessage("Style", "IDE0290:Use primary constructor", Justification = "Fuck off")]
     public TArray(int capacity = 0)
@@ -116,6 +117,8 @@ public sealed class TTable : TObject, IEnumerable<KeyValuePair<string, TObject>>
         return t;
     }
 
+    public static TTable FromDictionary(Dictionary<string, TObject> dictionary) => new() { Values = dictionary };
+    
     void ITCollection.Add(string key, TObject val) => Values.Add(key, val);
 
     void ITCollection.Add(TObject val) => throw new InvalidOperationException("Can't add to table like an array!");
