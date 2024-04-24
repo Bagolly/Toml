@@ -2,6 +2,7 @@
 using System.Collections;
 using System.Diagnostics.CodeAnalysis;
 using static Toml.Runtime.TOMLExceptionHandler;
+using System.Linq;
 
 namespace Toml.Runtime;
 
@@ -55,14 +56,8 @@ public sealed class TArray : TObject, IEnumerable<TObject>, ITCollection
 
     public static TArray With(TObject value) => [value];
 
-    public static TArray WithMany(params TObject[] values)
-    {
-        TArray t = [];
-        foreach (var obj in values)
-            t.Values.Add(obj);
-
-        return t;
-    }
+    public static TArray WithMany(params TObject[] values) => new(values.Length) { Values = [.. values] };
+    
 
     [SuppressMessage("Style", "IDE0290:Use primary constructor", Justification = "Fuck off")]
     public TArray(int capacity = 0)
