@@ -1,4 +1,6 @@
-﻿using System.IO;
+﻿using System.Buffers;
+using System.Diagnostics;
+using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text;
 
@@ -12,6 +14,12 @@ namespace Toml
 
         internal int Column { get; private set; }
 
+        private char[]? Buffer;
+
+        private int BufferSize;
+
+        private int BufferPosition;
+
         public TOMLStreamReader(Stream source)
         {
             if (!source.CanRead || !source.CanSeek)
@@ -20,6 +28,7 @@ namespace Toml
             BaseReader = new(source, Encoding.UTF8); //Encoding is UTF-8 by default.
             Line = 1;
             Column = 1;
+            Buffer = null;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -40,8 +49,12 @@ namespace Toml
         /// Returns the next available character, consuming it. 
         /// </summary>
         /// <returns>The next available character, or <see langword="EOF"/>('\0') if no more characters are available to read.</returns>
-        public char Read()
+        public char Read(bool useBuffered = false)
         {
+            if (useBuffered)
+                return BufferRead();
+            
+
             int readResult = BaseReader.Read();
             switch (readResult)
             {
@@ -76,8 +89,10 @@ namespace Toml
         /// Returns the next available character, without consuming it.
         /// </summary>
         /// <returns><see langword="EOF"/> ('\0') if there are no characters to be read; otherwise, the next available character.</returns>
-        public char Peek()
+        public char Peek(bool useBuffered = false)
         {
+            if (useBuffered)
+                return BufferPeek();
             int peekResult = BaseReader.Peek();
             return peekResult is -1 ? '\0' : (char)peekResult;
         }
@@ -134,8 +149,11 @@ namespace Toml
         /// Consumes the next character from the stream if it matches <paramref name="c"/>.
         /// </summary>
         /// <returns> <see langword="true"/> if <paramref name="c"/> matches the next character; otherwise <see langword="false"/>.</returns>
-        public bool MatchNext(char c)
+        public bool MatchNext(char c, bool useBuffered = false)
         {
+            if (useBuffered)
+                return BufferMatchNext(c);
+
             if (Peek() == c)
             {
                 Read();
@@ -173,6 +191,7 @@ namespace Toml
         /// </summary>
         /// <returns><see langword="true"/> if a line ending was matched; otherwise <see langword="false"/>.</returns>
         public bool MatchLineEnding() => MatchNext('\n') || MatchNext('\r') && MatchNext('\n');
+        //todo: update callsites to add carriage return if this method fails!
 
         /// <summary>
         /// Consumes characters while they match <paramref name="c"/>.
@@ -192,6 +211,83 @@ namespace Toml
             return MatchNext(c);
         }
 
-        public void Dispose() => BaseReader.Dispose();
+
+        /// <summary>
+        /// Initializes a secondary buffer and fills it with the next <paramref name="charCount"/> characters from the input stream
+        /// </summary>
+        public void BufferFill(int charCount)
+        {
+            Buffer = ArrayPool<char>.Shared.Rent(charCount); //not guaranteed to be exactly charCount long, so BufferSize the relevant length
+            BufferSize = charCount;
+
+            for (; charCount >= 0; charCount--)
+                Buffer[charCount] = Read();
+        }
+
+        public ReadOnlySpan<char> GetBuffer()
+        {
+            Debug.Assert(Buffer != null, "Attempted to access buffer when it's null!");
+            return Buffer;
+        }
+
+
+        /// <summary>
+        /// Initializes the secondary buffer with <paramref name="charCount"/> characters from <paramref name="buffer"/>.
+        /// </summary>
+        /// <exception cref="IOException"></exception>
+        public void BufferFill(ReadOnlySpan<char> buffer, int charCount)
+        {
+            Buffer = ArrayPool<char>.Shared.Rent(buffer.Length);
+            BufferSize = charCount;
+            BufferPosition = 0;
+
+            if (!buffer.TryCopyTo(Buffer))
+            {   
+                ArrayPool<char>.Shared.Return(Buffer);
+                throw new IOException("Failed to copy into secondary buffer!");
+            }
+        }
+
+
+        private bool EndOfBuffer => BufferPosition >= BufferSize;
+
+        private char BufferRead()
+        {
+            Debug.Assert(Buffer != null, "BufferedRead: Incorrect usage; buffer was null.");
+
+            return !EndOfBuffer ? Buffer[BufferPosition++] : Read();
+        }
+
+        private char BufferPeek()
+        {
+            Debug.Assert(Buffer != null, "BufferedPeek: Incorrect usage; buffer was null.");
+
+            return !EndOfBuffer ? Buffer[BufferPosition] : Peek();
+        }
+
+        private bool BufferMatchNext(char c)
+        {
+            Debug.Assert(Buffer != null, "BufferedMatchNext: Incorrect usage; buffer was null.");
+
+            if (!EndOfBuffer)
+            {
+                if (Buffer[BufferPosition] == c)
+                {
+                    ++BufferPosition;
+                    return true;
+                }
+                return false;
+            }
+
+            return MatchNext(c);
+        }
+
+
+        public void Dispose()
+        {
+            BaseReader.Dispose();
+            if (Buffer != null)
+                ArrayPool<char>.Shared.Return(Buffer);
+        }
     }
 }
