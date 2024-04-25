@@ -1,6 +1,7 @@
 ﻿using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.Linq;
 using static Toml.Runtime.TOMLExceptionHandler;
 
 namespace Toml.Runtime;
@@ -11,7 +12,7 @@ public abstract class TObject
     public enum TOMLType
     {
         String, Integer, Float, Boolean,
-        DateTimeOffset, LocalDateTime, LocalDate, LocalTime,
+        DateTimeOffset, DateTimeLocal, TimeOnly, DateOnly,
         Array, InlineTable, Table
     }
 
@@ -25,7 +26,7 @@ public abstract class TObject
 
 public abstract class TValue<T> : TObject
 {
-    public abstract T? Value { get; protected init; }
+    public virtual T? Value { get; protected init; }
 
     public override string ToString() => $"{(Value is null ? "null" : Value)}";
 
@@ -55,11 +56,10 @@ public sealed class TArray : TObject, IEnumerable<TObject>, ITCollection
 
     public static TArray With(TObject value) => [value];
 
+    //WARNING - CHANGES UNTESTED!
     public static TArray WithMany(params TObject[] values)
     {
-        TArray t = [];
-        foreach (var obj in values)
-            t.Values.Add(obj);
+        TArray t = new(values.Length) { Values = [.. values] }; //if you need longlength here you have problems...
 
         return t;
     }
@@ -143,11 +143,6 @@ public sealed class TTable : TObject, IEnumerable<KeyValuePair<string, TObject>>
 
 public sealed class TInteger : TValue<long>, IEquatable<TInteger>
 {
-    public override TOMLType Type { get; protected init; }
-
-    public override long Value { get; protected init; }
-
-
     public TInteger(long value)
     {
         Type = TOMLType.Integer;
@@ -164,11 +159,9 @@ public sealed class TInteger : TValue<long>, IEquatable<TInteger>
     public bool Equals(TInteger? other) => other?.Value == Value;
 }
 
+
 public sealed class TString : TValue<string>, IEquatable<TString>
 {
-    public override string? Value { get; protected init; }
-    public override TOMLType Type { get; protected init; }
-
     public TString(in ReadOnlySpan<char> str)
     {
         Type = TOMLType.String;
@@ -191,25 +184,20 @@ public sealed class TString : TValue<string>, IEquatable<TString>
     public bool Equals(TString? other) => other?.Value == Value;
 }
 
+
 public sealed class TBool : TValue<bool>, IEquatable<TBool>
 {
-    public override bool Value { get; protected init; }
-
-    public override TOMLType Type { get; protected init; }
-
-
-    [SuppressMessage("Style", "IDE0290:Use primary constructor", Justification = "Fuck off")]
     public TBool(bool value)
     {
         Type = TOMLType.Boolean;
         Value = value;
     }
 
-
     public override bool Equals(object? obj) => obj is TBool other && Type == other.Type && Value == other.Value;
     public override int GetHashCode() => HashCode.Combine(Type, Value);
     public bool Equals(TBool? other) => other?.Value == Value;
 }
+
 
 public sealed class TFloat(double value) : TValue<double>, IEquatable<TFloat>
 {
@@ -228,6 +216,73 @@ public sealed class TFloat(double value) : TValue<double>, IEquatable<TFloat>
     public static implicit operator double(TFloat val) => val.Value;
 }
 
+
+public sealed class TDateTimeOffset : TValue<DateTimeOffset>, IEquatable<DateTimeOffset>
+{        
+    public TDateTimeOffset(System.DateTimeOffset value)
+    {
+        Value = value;
+        Type = TOMLType.DateTimeOffset;
+    }
+
+    public override bool Equals(object? obj) => obj is TDateTimeOffset dt && Type == dt.Type && Value == dt.Value;
+
+    public override int GetHashCode() => HashCode.Combine(Type, Value);
+
+    public bool Equals(DateTimeOffset other) => Value == other;
+
+    public bool IsUnknownLocal { get; init; }
+}
+
+public sealed class TDateTime : TValue<DateTime>, IEquatable<DateTime>
+{
+    public TDateTime(DateTime value)
+    {
+        Value = value;
+        Type = TOMLType.DateTimeLocal;
+    }
+
+    public override bool Equals(object? obj) => obj is TDateTime dt && Type == dt.Type && Value == dt.Value;
+
+    public bool Equals(DateTime other) => Value == other;
+
+    public override int GetHashCode() => HashCode.Combine(Type, Value);
+}
+
+public sealed class TTimeOnly : TValue<TimeOnly>, IEquatable<TimeOnly>
+{
+    public TTimeOnly(TimeOnly value, TimeSpan? offset)
+    {
+        Value = value;
+        Offset = offset;
+        Type = TOMLType.TimeOnly;
+    }
+
+    public TimeSpan? Offset { get; init; }
+
+    public bool IsLocalTime => Offset is null;
+
+    public bool Equals(TimeOnly other) => Value == other;
+
+    public override bool Equals(object? obj) => obj is TTimeOnly t && t.Value == Value && t.Offset == Offset && t.Type == Type;
+
+    public override int GetHashCode() => HashCode.Combine(Type, Value, Offset);
+}
+
+public sealed class TDateOnly : TValue<DateOnly>, IEquatable<DateOnly>
+{
+    public TDateOnly(DateOnly value)
+    {
+        Value = value;
+        Type = TOMLType.DateOnly;
+    }
+
+    public bool Equals(DateOnly other) => Value == other;
+
+    public override bool Equals(object? obj) => obj is TDateOnly d && d.Value == Value && d.Type == Type;
+
+    public override int GetHashCode() => HashCode.Combine(Type, Value);
+}
 
 class TOMLExceptionHandler //Temporarily used to centralize handling of error strings
 {
