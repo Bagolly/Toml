@@ -5,8 +5,8 @@ using System.Runtime.InteropServices;
 
 namespace Toml
 {
-    //Ripped .NET internal code UwU
-    public ref struct ValueStringBuilder //TLDR; MUST BE PASSED AS REF WHEN ARGUMENT!
+    //.NET internal code
+    public ref struct ValueStringBuilder //MUST BE PASSED AS REF WHEN ARGUMENT!
     {
         private char[]? _arrayToReturnToPool;
         private Span<char> _chars;
@@ -82,7 +82,7 @@ namespace Toml
         }
 
         /// <summary>
-        /// [CAUTION] This method calls Dispose()! Only call once at the end of the object's lifetime!
+        /// <see langword="[CAUTION]"/> This method calls Dispose()! Only call once at the end of the object's lifetime!
         /// </summary>
         public override string ToString()
         {
@@ -138,7 +138,7 @@ namespace Toml
 
             int remaining = _appendedCharCount - index;
 
-            _chars.Slice(index, remaining).CopyTo(_chars.Slice(index + count));
+            _chars.Slice(index, remaining).CopyTo(_chars[(index + count)..]);
             _chars.Slice(index, count).Fill(value);
 
             _appendedCharCount += count;
