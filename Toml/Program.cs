@@ -1,10 +1,20 @@
 ﻿global using System;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.Diagnostics.Runtime.DacInterface;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Numerics;
+using System.Reflection.Metadata;
+using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading;
+using System.Timers;
 using Toml.Runtime;
 using static System.Char;
 #pragma warning disable IDE0290
@@ -38,10 +48,16 @@ internal class Program
         Console.WriteLine("Test3 | fruit.orange.color: " + root["fruit"]["orange"]["color"]);
         */
 
-        using FileStream fs = new("C:/Users/BAGOLY/Desktop/numbertests.txt", FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan);
+        using FileStream fs = new("C:/Users/BAGOLY/Desktop/ab.txt", FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan);
+
+
+
 
         TOMLTokenizer t = new(fs);
+        Stopwatch sw = Stopwatch.StartNew();
         _ = t.TokenizeFile();
+        sw.Stop();
+        Console.WriteLine("Elapsed: " + sw.ElapsedMilliseconds + "ms");
 
         Console.ForegroundColor = ConsoleColor.Red;
         foreach (var msg in t.TempErrorLogger.Value)
@@ -49,15 +65,23 @@ internal class Program
         Console.ResetColor();
 
         List<string> output = new(3);
-        Console.OutputEncoding = Encoding.UTF8;
+        //Console.OutputEncoding = Encoding.UTF8;
         foreach (var token in t.TokenStream)
         {
-            if (token.TokenType is TOMLTokenType.Integer or TOMLTokenType.Float)
-                Console.WriteLine(token);
+            if(token.Metadata.HasFlag(TOMLTokenMetadata.TimeOnly))
+                Console.Write("[TIME_ONLY] ");
+            if (token.Metadata.HasFlag(TOMLTokenMetadata.DateOnly))
+                Console.Write("[DATE_ONLY] ");
+            if (token.Metadata.HasFlag(TOMLTokenMetadata.Local))
+                Console.Write("[LOCAL] ");
+            if (token.Metadata.HasFlag(TOMLTokenMetadata.UnkownLocal))
+                Console.Write("[UNKOWN_LOCAL] ");
+
+            Console.WriteLine(token.Payload);
         }
     }
 
-    public static Stream GenerateStreamFromString(string s)
+    public static Stream FromString(string s)//testing only
     {
         MemoryStream stream = new();
         StreamWriter writer = new(stream);
@@ -155,7 +179,6 @@ sealed class TOMLTokenizer
     internal const char CurlyClose = '}';
     internal const string Empty = "";
     #endregion
-
     public TOMLStreamReader Reader { get; init; }
 
     public Queue<TOMLToken> TokenStream { get; init; }
@@ -176,9 +199,11 @@ sealed class TOMLTokenizer
             Tokenize();
         }
 
-        TokenStream.Enqueue(new(TOMLTokenType.Eof, -1, -1, []));
+        TokenStream.Enqueue(new(TOMLTokenType.Eof, (-1, -1), (-1, -1), []));
         return TokenStream;
     }
+
+    public (int, int) CurrentPosition => (Reader.Line, Reader.Column);
 
     private void Synchronize(int syncMinimum) //Skips syncMinimum amount of characters
     {
@@ -206,6 +231,14 @@ sealed class TOMLTokenizer
         if (IsKey(Reader.PeekSkip(true)))
         {
             TokenizeKeyValuePair();
+
+            if (Reader.PeekSkip() is not (EOF or Comment) && !Reader.MatchLineEnding())
+            {
+                Reader.SkipWhiteSpace();
+                //ReadLine() here also functions as a syncpoint to the end of the line.
+                TempErrorLogger.Value.Add($"Found trailing characters: '{Reader.BaseReader.ReadLine()}'");
+            }
+
             return;
         }
 
@@ -233,6 +266,7 @@ sealed class TOMLTokenizer
     {
         //Control is passed to this method when Tokenize() encounters a '#' character.
         //The '#' character is already consumed!
+        var start = CurrentPosition;
         char c = Reader.Peek();
         ValueStringBuilder vsb = new(stackalloc char[128]);
         while (!Reader.MatchLineEnding())
@@ -252,7 +286,7 @@ sealed class TOMLTokenizer
                 vsb.Append(c);
         }
 
-        TokenStream.Enqueue(new(TOMLTokenType.Comment, Reader.Line, Reader.Column, vsb.RawChars));
+        TokenStream.Enqueue(new(TOMLTokenType.Comment, start, CurrentPosition, vsb.RawChars));
     }
 
     private void TokenizeTable()
@@ -261,6 +295,8 @@ sealed class TOMLTokenizer
         //The '[' character is consumed!
 
         //Console.WriteLine("table found, next will be: " + Reader.PeekSkip());
+        var start = CurrentPosition;
+
         if (Reader.MatchNextSkip(SquareOpen)) //Double '[' means an arraytable
         {
             TokenizeArrayTable();
@@ -268,7 +304,7 @@ sealed class TOMLTokenizer
         }
 
         //Decl tokens will be used for scope switches in the parser.
-        TokenStream.Enqueue(new(TOMLTokenType.TableDecl, Reader.Line, Reader.Column, []));
+        TokenStream.Enqueue(new(TOMLTokenType.TableDecl, start, CurrentPosition, []));
 
         TokenizeKey(TOMLTokenType.Table);                   //Tokenize the table's key, and mark that it's part of a table declaration
 
@@ -283,14 +319,15 @@ sealed class TOMLTokenizer
         //Console.WriteLine("No errors with table decl");
     }
 
+
     private void TokenizeArrayTable()
     {
         //Control is passed here when TokenizeTable() encounters a second '[' character.
         //Because TokenizeTable calls MatchNextSkip, the second '[' is already consumed.
-
+        var start = CurrentPosition;
 
         //Decl tokens will be used for scope switches in the parser.
-        TokenStream.Enqueue(new(TOMLTokenType.ArrayTableDecl, Reader.Line, Reader.Column, []));
+        TokenStream.Enqueue(new(TOMLTokenType.ArrayTableDecl, start, CurrentPosition, []));
 
 
         TokenizeKey(TOMLTokenType.ArrayTable);    //Tokenize the arraytable's key, and mark that it's part of an arraytable declaration.
@@ -314,29 +351,19 @@ sealed class TOMLTokenizer
             Synchronize(LF);
         }
 
-
         TokenizeValue();
-
-
-        if (Reader.PeekSkip() is not (EOF or Comment) && !Reader.MatchLineEnding())
-        {
-
-            TempErrorLogger.Value.Add("Found trailing characters after keyvaluepair.");
-
-            Console.WriteLine("Rest: " + Reader.BaseReader.ReadToEnd());
-            Console.ReadKey();
-            Synchronize(LF);
-        }
     }
 
 
-    private void TokenizeKey(TOMLTokenType keyTypeModifier)
+    /// <summary>
+    /// <paramref name="keyType"/>: marks whether the key is part of a table or arraytable declaration, or a simple key.
+    /// </summary>
+    private void TokenizeKey(TOMLTokenType keyType)
     {
         //Control is passed to this method from:
         //1. When a top-level key is found, passed as: Tokenize()->TokenizeKeyValuePair()->TokenizeKey().
         //2. TokenizeArrayTable(), after verifying both '[' characters.
         //3. TokenizeTable(), after verifying the '[' character.
-
 
         char c = Reader.PeekSkip();
         if (c is EOF)
@@ -345,16 +372,13 @@ sealed class TOMLTokenizer
             return;
         }
 
-        do
-        {
-            TokenizeFragment(keyTypeModifier);
-        } while (Reader.MatchNextSkip(Dot));
+        do { TokenizeKeyFragment(keyType); } while (Reader.MatchNextSkip(Dot));
     }
 
-    private void TokenizeFragment(TOMLTokenType keyTypeModifier)
+    private void TokenizeKeyFragment(TOMLTokenType keyTypeModifier)
     {
         //Control is passed to this method from TokenizeKey() for each key fragment.
-
+        var start = CurrentPosition;
         char c = Reader.PeekSkip();
         //Console.WriteLine("Fragment started, read: " + c);
         if (c is EOF)
@@ -370,51 +394,31 @@ sealed class TOMLTokenizer
             switch (c)
             {
                 case DoubleQuote:
-                    TokenizeString(ref vsb);
+                    Reader.ReadSkip();
+                    TokenizeBasicString(ref vsb);
                     break;
                 case SingleQuote:
+                    Reader.ReadSkip();
                     TokenizeLiteralString(ref vsb);
+                    keyMetadata = TOMLTokenMetadata.QuotedLiteralKey;
                     break;
                 default:
                     TokenizeBareKey(ref vsb);
                     keyMetadata = TOMLTokenMetadata.None;
                     break;
             }
-            TokenStream.Enqueue(new(keyTypeModifier, Reader.Line, Reader.Column, vsb.RawChars, keyMetadata));
+            TokenStream.Enqueue(new(keyTypeModifier, start, CurrentPosition, vsb.RawChars, keyMetadata));
         }
         finally { vsb.Dispose(); }
 
         //Console.WriteLine("Fragment finished, key: " + TokenStream.Last().Payload);
     }
 
-
-    private void TokenizeArray()
-    {
-
-        //When control is passed to this method, the first [ is already consumed.
-        TokenStream.Enqueue(new(TOMLTokenType.ArrayStart, Reader.Line, Reader.Column, []));
-
-        do
-        {
-            TokenizeValue();
-        } while (Reader.MatchNextSkip(Comma));
-
-        if (!Reader.MatchNextSkip(SquareClose))
-        {
-            TempErrorLogger.Value.Add("Unterminated array");
-            Synchronize(1); //dont currently have a better idea for a syncpoint, so skip one then see where it goes..
-        }
-
-        else
-            TokenStream.Enqueue(new(TOMLTokenType.ArrayEnd, Reader.Line, Reader.Column, []));
-    }
-
-
     private void TokenizeValue()
     {
         //Control is passed to this method from TokenizeArray() or TokenizeKeyValuePair()
         //No characters are consumed, including leading double quotes for strings.
-
+        var start = CurrentPosition;
         ValueStringBuilder buffer = new(stackalloc char[128]);
         try
         {
@@ -425,15 +429,15 @@ sealed class TOMLTokenizer
                     switch (Reader.MatchCount(DoubleQuote))
                     {
                         case 1: //One doublequote; basic string
-                            TokenizeString(ref buffer);
-                            TokenStream.Enqueue(new(TOMLTokenType.String, Reader.Line, Reader.Column, buffer.RawChars));
+                            TokenizeBasicString(ref buffer);
+                            TokenStream.Enqueue(new(TOMLTokenType.String, start, CurrentPosition, buffer.RawChars));
                             break;
                         case 2: //Two doublequotes cannot start any string
                             TempErrorLogger.Value.Add("Strings cannot start with '\"\"'.");
                             goto ERR_SYNC;
                         case >= 3: //Three doublequotes; multiline string
-                            TokenizeMultiLineString(ref buffer);
-                            TokenStream.Enqueue(new(TOMLTokenType.String, Reader.Line, Reader.Column, buffer.RawChars, TOMLTokenMetadata.Multiline));
+                            TokenizeMultiLineBasicString(ref buffer);
+                            TokenStream.Enqueue(new(TOMLTokenType.String, start, CurrentPosition, buffer.RawChars, TOMLTokenMetadata.Multiline));
                             break;
                         default:
                             TempErrorLogger.Value.Add("MatchCount returned an unusual value."); // Currently impossible, MatchCount returns between 0 and int.MaxValue
@@ -448,14 +452,14 @@ sealed class TOMLTokenizer
                     {
                         case 1: //One singlequote; basic literal string
                             TokenizeLiteralString(ref buffer);
-                            TokenStream.Enqueue(new(TOMLTokenType.String, Reader.Line, Reader.Column, buffer.RawChars, TOMLTokenMetadata.Literal));
+                            TokenStream.Enqueue(new(TOMLTokenType.String, start, CurrentPosition, buffer.RawChars, TOMLTokenMetadata.Literal));
                             break;
                         case 2: //Two singlequotes cannot start any string
                             TempErrorLogger.Value.Add("Literal strings cannot start with \"''\".");
                             goto ERR_SYNC;
                         case >= 3: //Three singlequotes; multiline literal string
                             TokenizeMultiLineLiteralString(ref buffer);
-                            TokenStream.Enqueue(new(TOMLTokenType.String, Reader.Line, Reader.Column, buffer.RawChars, TOMLTokenMetadata.MultilineLiteral));
+                            TokenStream.Enqueue(new(TOMLTokenType.String, start, CurrentPosition, buffer.RawChars, TOMLTokenMetadata.MultilineLiteral));
                             break;
                         default:
                             TempErrorLogger.Value.Add("MatchCount returned an unusual value."); // Currently impossible, MatchCount returns between 0 and int.MaxValue
@@ -470,15 +474,22 @@ sealed class TOMLTokenizer
                     TokenizeArray();
                     return;
 
+                case CurlyOpen:
+                    TokenizeInlineTable();
+                    return;
+
                 case 't' or 'f': //Bool is added on call-site because the allocated stack is very small (at most 5*2 bytes) and short-lived.
                     TokenizeBool();
                     return;
 
-                case >= '0' and <= '9': //decimals
-                case 'i' or 'n':        //Infinity and NaN
+                case >= '0' and <= '9':
+                    ResolveNumberOrDateTime(ref buffer);
+                    return;
+                case 'i' or 'n':
                 case '+' or '-':        //Optional sign
                     TokenizeNumber(ref buffer);
                     return;
+
                 default:
                     TempErrorLogger.Value.Add($"Could find a parse method for value token {Reader.PeekSkip()}");
                     Synchronize(LF);
@@ -488,6 +499,61 @@ sealed class TOMLTokenizer
         finally { buffer.Dispose(); }
     }
 
+
+    private void TokenizeInlineTable()
+    {
+        Reader.Read(); //Consume opening curly bracket
+        var start = CurrentPosition;
+        TokenStream.Enqueue(new(TOMLTokenType.InlineTableStart, start, CurrentPosition, []));
+
+        if (Reader.MatchNextSkip(CurlyClose))
+        {
+            TokenStream.Enqueue(new(TOMLTokenType.InlineTableEnd, start, CurrentPosition, []));
+            return;
+        }
+
+        do { TokenizeKeyValuePair(); } while (Reader.MatchNextSkip(Comma));
+
+        Reader.SkipWhiteSpace();
+
+        if (Reader.MatchNext(CurlyClose))
+            TokenStream.Enqueue(new(TOMLTokenType.InlineTableEnd, start, CurrentPosition, []));
+
+        else if (Reader.MatchLineEnding())
+            TempErrorLogger.Value.Add("Inline tables should appear on a single line.");
+
+        else
+        {
+            TempErrorLogger.Value.Add("Unterminated or invalid inline table.");
+            Synchronize(LF);
+        }
+    }
+
+    private void TokenizeArray()
+    {
+        Reader.Read(); //Consume opening [
+        var start = CurrentPosition;
+        TokenStream.Enqueue(new(TOMLTokenType.ArrayStart, start, CurrentPosition, []));
+
+        do
+        {
+            if (Reader.PeekSkip() is SquareClose)
+                break;
+
+            TokenizeValue();
+        } while (Reader.MatchLineEnding() || Reader.MatchNextSkip(Comma));
+
+        if (!Reader.MatchNextSkip(SquareClose))
+        {
+            TempErrorLogger.Value.Add("Unterminated array");
+            Synchronize(LF);
+        }
+
+        else
+            TokenStream.Enqueue(new(TOMLTokenType.ArrayEnd, start, CurrentPosition, []));
+    }
+
+
     private void TokenizeBareKey(ref ValueStringBuilder vsb)
     {
         while (IsBareKey(Reader.PeekSkip()))
@@ -495,7 +561,7 @@ sealed class TOMLTokenizer
     }
 
 
-    private void TokenizeString(ref ValueStringBuilder vsb)
+    private void TokenizeBasicString(ref ValueStringBuilder vsb)
     {
         char c;
         while ((c = Reader.Read()) is not (EOF or DoubleQuote))
@@ -542,7 +608,8 @@ sealed class TOMLTokenizer
         //This is so that only one ValueStringBuilder is allocated.
     }
 
-    private void TokenizeMultiLineString(ref ValueStringBuilder vsb)
+
+    private void TokenizeMultiLineBasicString(ref ValueStringBuilder vsb)
     {
         Reader.MatchLineEnding(); //Skip newline if immediately after opening delimiter (as defined by spec)
 
@@ -611,6 +678,7 @@ sealed class TOMLTokenizer
         return;
     }
 
+
     private void TokenizeLiteralString(ref ValueStringBuilder vsb)
     {
         char c;
@@ -637,6 +705,7 @@ sealed class TOMLTokenizer
         //The string itself is added in TokenizeValue(), DO NOT TRY TO ADD OR RETURN ANYTHING HERE.
         //This is so that only one ValueStringBuilder is allocated.
     }
+
 
     private void TokenizeMultiLineLiteralString(ref ValueStringBuilder vsb)
     {
@@ -704,17 +773,16 @@ sealed class TOMLTokenizer
     }
 
 
-    private void TokenizeInteger(ref ValueStringBuilder vsb, TOMLTokenMetadata format)
+    private void TokenizeInteger(ref ValueStringBuilder vsb, TOMLTokenMetadata format, bool useBuffer)
     {
         char c;
         bool underScore = false;
-
         switch (format)
         {
             case TOMLTokenMetadata.Hex: TokenizeHexadecimal(ref vsb); break;
             case TOMLTokenMetadata.Binary: TokenizeBinary(ref vsb); break;
             case TOMLTokenMetadata.Octal: TokenizeOctal(ref vsb); break;
-            case TOMLTokenMetadata.None: TokenizeDecimal(ref vsb); break;
+            case TOMLTokenMetadata.None: TokenizeDecimal(ref vsb, useBuffer); break;
             default: throw new ArgumentException("If this got thrown, I'm a fucking idiot."); //Internal usage rules *should* prevent this from triggering. Times this got thrown counter: [0]
         }
 
@@ -727,8 +795,8 @@ sealed class TOMLTokenizer
 
         void TokenizeOctal(ref ValueStringBuilder vsb)
         {
-            Reader.Read(); //Skip prefix char
-            while ((c = Reader.Peek()) is >= '0' and <= '7' || c is '_')
+            Reader.MatchNext('o', useBuffer); //Skip prefix char. If called from TokenizeNumber it's consumed, but if it's synced then it's not.
+            while ((c = Reader.Peek(useBuffer)) is >= '0' and <= '7' || c is '_')
             {
                 if (underScore && c is '_')
                 {
@@ -739,14 +807,14 @@ sealed class TOMLTokenizer
 
                 underScore = c is '_';
                 vsb.Append(c);
-                _ = Reader.Read();
+                _ = Reader.Read(useBuffer);
             }
         }
 
         void TokenizeBinary(ref ValueStringBuilder vsb)
         {
-            Reader.Read(); //Skip prefix char
-            while ((c = Reader.Peek()) is '0' or '1' || c is '_')
+            Reader.MatchNext('b', useBuffer); //Skip prefix char. If called from TokenizeNumber it's consumed, but if it's synced then it's not.
+            while ((c = Reader.Peek(useBuffer)) is '0' or '1' || c is '_')
             {
                 if (underScore && c is '_')
                 {
@@ -757,14 +825,14 @@ sealed class TOMLTokenizer
 
                 underScore = c is '_';
                 vsb.Append(c);
-                _ = Reader.Read();
+                _ = Reader.Read(useBuffer);
             }
         }
 
         void TokenizeHexadecimal(ref ValueStringBuilder vsb)
         {
-            Reader.Read(); //Skip prefix char
-            while (IsAsciiHexDigit(c = Reader.Peek()) || c is '_')
+            Reader.MatchNext('x', useBuffer); //Skip prefix char. If called from TokenizeNumber it's consumed, but if it's synced then it's not.
+            while (IsAsciiHexDigit(c = Reader.Peek(useBuffer)) || c is '_')
             {
                 if (underScore && c is '_')
                 {
@@ -775,17 +843,18 @@ sealed class TOMLTokenizer
 
                 underScore = c is '_';
                 vsb.Append(c);
-                _ = Reader.Read();
+                _ = Reader.Read(useBuffer);
             }
         }
     }
 
-    private void TokenizeDecimal(ref ValueStringBuilder vsb)
+
+    private void TokenizeDecimal(ref ValueStringBuilder vsb, bool useBuffer)
     {
         char c;
         bool underScore = false;
 
-        while (IsAsciiDigit(c = Reader.Peek()) || c is '_')
+        while (IsAsciiDigit(c = Reader.Peek(useBuffer)) || c is '_')
         {
             if (underScore && c is '_')
             {
@@ -795,72 +864,107 @@ sealed class TOMLTokenizer
             }
 
             underScore = c is '_';
-            vsb.Append(c);
-            _ = Reader.Read();
+            vsb.Append(Reader.Read(useBuffer));
         }
     }
 
-    private void TokenizeNumber(ref ValueStringBuilder vsb)
-    {
-        char c = Reader.Read();
-        bool? isNegative = c == '-' ? true : c == '+' ? false : null; //true -> negative; false -> positive; null -> no prefix
 
-        if (isNegative != null)//consume + or -
-            c = Reader.Read();
+    private void ResolveNumberOrDateTime(ref ValueStringBuilder vsb)
+    {
+
+        Span<char> buffer = stackalloc char[4];
+        int i = 0;
+        for (; i < 4; i++)
+        {
+            if (!IsAsciiDigit(Reader.Peek()))//if its not a digit theres no point buffering, since datetime are only asci, so the ambiguity resolves
+                break;
+
+            buffer[i] = Reader.Read();
+        }
+
+        switch (Reader.Peek())
+        {
+            case '-':
+                Reader.BufferFill(buffer, i);
+                TokenizeDateOrDateTime(ref vsb);
+                return;
+            case ':':
+                Reader.BufferFill(buffer, i);
+                BufferedTokenizeTimeOnly();
+                return;
+        }
+
+
+        buffer[i++] = Reader.Read();
+        Reader.BufferFill(buffer, i);
+        TokenizeNumber(ref vsb, true);
+    }
+
+
+    private void TokenizeNumber(ref ValueStringBuilder vsb, bool useBuffer = false)
+    {
+        char c = Reader.Read(useBuffer);
+        bool? hasSign = c == '-' ? true : c == '+' ? false : null; //T is -, F is +, null is none
+
+        var start = CurrentPosition;
+
+        if (hasSign != null)//consume sign
+            c = Reader.Read(useBuffer);
+
 
         if (c is '0') //Prefixed nums, leading zero check
         {
-            switch (Reader.Peek())
+            switch (Reader.Peek(useBuffer))
             {
                 case >= '0' and <= '9':
                     TempErrorLogger.Value.Add("Only prefixed numbers and exponents can contain leading zeros.");
                     Synchronize(LF);
                     return;
 
-                case 'x' or 'b' or 'o' when isNegative is not null:
-                    TempErrorLogger.Value.Add($"Prefixed numbers may not start with {(isNegative is true ? '-' : '+')}.");
+                case 'x' or 'b' or 'o' when hasSign is not null:
+                    TempErrorLogger.Value.Add($"Prefixed numbers cannot have signs.");
                     Synchronize(LF);
                     return;
 
                 case 'x':
-                    TokenizeInteger(ref vsb, TOMLTokenMetadata.Hex);
-                    TokenStream.Enqueue(new(TOMLTokenType.Integer, Reader.Line, Reader.Column, vsb.RawChars, TOMLTokenMetadata.Hex));
+                    TokenizeInteger(ref vsb, TOMLTokenMetadata.Hex, useBuffer);
+                    TokenStream.Enqueue(new(TOMLTokenType.Integer, start, CurrentPosition, vsb.RawChars, TOMLTokenMetadata.Hex));
                     return;
 
                 case 'b':
-                    TokenizeInteger(ref vsb, TOMLTokenMetadata.Binary);
-                    TokenStream.Enqueue(new(TOMLTokenType.Integer, Reader.Line, Reader.Column, vsb.RawChars, TOMLTokenMetadata.Binary));
+                    TokenizeInteger(ref vsb, TOMLTokenMetadata.Binary, useBuffer);
+                    TokenStream.Enqueue(new(TOMLTokenType.Integer, start, CurrentPosition, vsb.RawChars, TOMLTokenMetadata.Binary));
                     return;
 
                 case 'o':
-                    TokenizeInteger(ref vsb, TOMLTokenMetadata.Octal);
-                    TokenStream.Enqueue(new(TOMLTokenType.Integer, Reader.Line, Reader.Column, vsb.RawChars, TOMLTokenMetadata.Octal));
+                    TokenizeInteger(ref vsb, TOMLTokenMetadata.Octal, useBuffer);
+                    TokenStream.Enqueue(new(TOMLTokenType.Integer, start, CurrentPosition, vsb.RawChars, TOMLTokenMetadata.Octal));
                     return;
 
                 case '.':
-                    if (isNegative != null)
-                        vsb.Append(isNegative is true ? '-' : '+');
+                    if (hasSign != null)
+                        vsb.Append(hasSign is true ? '-' : '+');
                     vsb.Append('0');
-                    goto FRAC;
+                    break; //will go to the switch
 
                 default:
-                    TokenStream.Enqueue(new(TOMLTokenType.Integer, Reader.Line, Reader.Column, ['0']));
+                    TokenStream.Enqueue(new(TOMLTokenType.Integer, start, CurrentPosition, ['0']));
                     return;
             }
         }
 
         else if (IsAsciiDigit(c)) //Decimal number
         {
-            if (isNegative != null)
-                vsb.Append(isNegative is true ? '-' : '+');
+            if (hasSign != null)
+                vsb.Append(hasSign is true ? '-' : '+');
 
             vsb.Append(c); //Append the originally read character
 
-            TokenizeInteger(ref vsb, TOMLTokenMetadata.None);
+            TokenizeInteger(ref vsb, TOMLTokenMetadata.None, useBuffer);
 
-            if (Reader.Peek() is not ('.' or 'e' or 'E')) //Decimal integer
+            if (Reader.Peek(useBuffer) is not ('.' or 'e' or 'E')) //Decimal integer
             {
-                TokenStream.Enqueue(new(TOMLTokenType.Integer, Reader.Line, Reader.Column, vsb.RawChars));
+                TokenStream.Enqueue(new(TOMLTokenType.Integer, start, CurrentPosition, vsb.RawChars));
                 return;
             }
         }
@@ -868,7 +972,7 @@ sealed class TOMLTokenizer
 
         else if (c is 'i') //Infinity
         {
-            if (!Reader.MatchNext('n') || !Reader.MatchNext('f'))
+            if (!Reader.MatchNext('n', useBuffer) || !Reader.MatchNext('f', useBuffer))
             {
                 TempErrorLogger.Value.Add("Expected literal 'inf'.");
                 Synchronize(LF);
@@ -876,10 +980,10 @@ sealed class TOMLTokenizer
 
             else
             {
-                if (isNegative != null)
-                    vsb.Append(isNegative is true ? '-' : '+');
+                if (hasSign != null)
+                    vsb.Append(hasSign is true ? '-' : '+');
                 vsb.Append("inf".AsSpan());
-                TokenStream.Enqueue(new(TOMLTokenType.Float, Reader.Line, Reader.Column, vsb.RawChars, TOMLTokenMetadata.FloatInf));
+                TokenStream.Enqueue(new(TOMLTokenType.Float, start, CurrentPosition, vsb.RawChars, TOMLTokenMetadata.FloatInf));
             }
 
             return;
@@ -888,7 +992,7 @@ sealed class TOMLTokenizer
 
         else if (c is 'n') //NaN
         {
-            if (!Reader.MatchNext('a') || !Reader.MatchNext('n'))
+            if (!Reader.MatchNext('a', useBuffer) || !Reader.MatchNext('n', useBuffer))
             {
                 TempErrorLogger.Value.Add("Expected literal 'nan'.");
                 Synchronize(LF);
@@ -896,58 +1000,72 @@ sealed class TOMLTokenizer
 
             else
             {
-                if (isNegative != null)
-                    vsb.Append(isNegative is true ? '-' : '+');
+                if (hasSign != null)
+                    vsb.Append(hasSign is true ? '-' : '+');
                 vsb.Append("nan".AsSpan());
-                TokenStream.Enqueue(new(TOMLTokenType.Float, Reader.Line, Reader.Column, vsb.RawChars, TOMLTokenMetadata.FloatNan));
+                TokenStream.Enqueue(new(TOMLTokenType.Float, start, CurrentPosition, vsb.RawChars, TOMLTokenMetadata.FloatNan));
             }
 
             return;
         }
 
-    FRAC:                   //Jump is for zero, eg. 0.5 or 0.123e-2
-        switch (Reader.Read()) //Float
+        switch (Reader.Read(useBuffer)) //Float
         {
             case '.': //Fractional
-                if (!IsAsciiDigit(Reader.Peek()))
+                TokenizeFractional(ref vsb, useBuffer);
+
+                if (Reader.Peek(useBuffer) is 'e' or 'E') //An exponent part may follow a fractional part
                 {
-                    TempErrorLogger.Value.Add("Decimal points must have digits on both sides.");
-                    Synchronize(LF);
-                    return;
+                    Reader.Read(useBuffer);
+                    goto case 'e';
                 }
 
-                vsb.Append('.');
-
-                TokenizeDecimal(ref vsb);  //The fractional part is "a decimal point followed by one or more digits."
-
-                if (Reader.Peek() is 'e' or 'E')//an exponent part may follow a fractional part
-                    goto case 'e';
-
-                TokenStream.Enqueue(new(TOMLTokenType.Float, Reader.Line, Reader.Column, vsb.RawChars));
+                TokenStream.Enqueue(new(TOMLTokenType.Float, start, CurrentPosition, vsb.RawChars));
                 return;
 
             case 'E': //Exponent
             case 'e':
-                if (Reader.Peek() is 'e' or 'E')
-                    Reader.Read();
-
-                vsb.Append('e'); //Add and consume 'e'. Normalize exponent to lowercase
-
-                if (Reader.MatchNext('-'))
-                    vsb.Append('-');
-
-                else if (Reader.MatchNext('+'))
-                    vsb.Append('+');
-
-                TokenizeDecimal(ref vsb);    //The exponent part "follows the same rules as decimal integer values but may include leading zeroes."
-                TokenStream.Enqueue(new(TOMLTokenType.Float, Reader.Line, Reader.Column, vsb.RawChars, TOMLTokenMetadata.FloatHasExponent));
+                TokenizeExponent(ref vsb, useBuffer);
+                TokenStream.Enqueue(new(TOMLTokenType.Float, start, CurrentPosition, vsb.RawChars, TOMLTokenMetadata.FloatHasExponent));
                 return;
         }
+    }
+
+    private void TokenizeExponent(ref ValueStringBuilder vsb, bool useBuffer)
+    {
+        //Exponent character should already be consumed when control is passed to this method!
+        vsb.Append('e');
+
+        char maybeSign = Reader.Peek(useBuffer);
+
+        if (maybeSign is '-' or '+') //basically a MatchNext() but shorter (and 1 less branch)
+            vsb.Append(Reader.Read(useBuffer));
+
+
+        //The exponent part "follows the same rules as decimal integer values but may include leading zeroes."
+        TokenizeDecimal(ref vsb, useBuffer);
+        return;
+    }
+
+    private void TokenizeFractional(ref ValueStringBuilder vsb, bool useBuffer)
+    {
+        //Dot should already be consumed when control is passed to this method!
+        if (!IsAsciiDigit(Reader.Peek(useBuffer)))
+        {
+            TempErrorLogger.Value.Add("Decimal points must have digits on both sides.");
+            Synchronize(LF);
+            return;
+        }
+
+        vsb.Append('.');
+
+        TokenizeDecimal(ref vsb, useBuffer);  //The fractional part is "a decimal point followed by one or more digits."
     }
 
 
     private void TokenizeBool()
     {
+        var start = CurrentPosition;
         if (Reader.Peek() is 't')
         {
             Span<char> bufferT = stackalloc char[4];
@@ -958,7 +1076,7 @@ sealed class TOMLTokenizer
                 Synchronize(LF);
                 return;
             }
-            TokenStream.Enqueue(new(TOMLTokenType.Bool, Reader.Line, Reader.Column, bufferT));
+            TokenStream.Enqueue(new(TOMLTokenType.Bool, start, CurrentPosition, bufferT));
             return;
         }
 
@@ -970,13 +1088,195 @@ sealed class TOMLTokenizer
             return;
         }
 
-        TokenStream.Enqueue(new(TOMLTokenType.Bool, Reader.Line, Reader.Column, bufferF));
+        TokenStream.Enqueue(new(TOMLTokenType.Bool, start, CurrentPosition, bufferF));
         return;
     }
 
-    private void TokenizeDateTime()
-    {
 
+    private void TokenizeDateOrDateTime(ref ValueStringBuilder vsb)
+    {
+        Reader.Read();  //Consume '-' (The char is already checked before calling this method)
+        TOMLTokenMetadata metadata = TOMLTokenMetadata.None;
+        Span<char> buffer = stackalloc char[5];
+
+        if (Reader.BaseReader.ReadBlock(buffer) != 5)
+        {
+            TempErrorLogger.Value.Add("Invalid date format.");
+            Synchronize(LF);
+            return;
+        }
+
+        if (!DateOnly.TryParseExact(buffer, "MM-dd", out var date))
+        {
+            TempErrorLogger.Value.Add("Invalid month and/or day.");
+            Synchronize(LF);
+            return;
+        }
+
+        date = new(int.Parse(Reader.GetBuffer()), date.Month, date.Day); //retrieve year from buffer
+
+
+        if (!IsAsciiDigit(Reader.PeekSkip()) && !Reader.MatchNext('T'))
+        {
+            Console.WriteLine("Dateonly. Result: " + date);
+            metadata |= TOMLTokenMetadata.DateOnly;
+
+            TokenStream.Enqueue(new(TOMLTokenType.TimeStamp, CurrentPosition, CurrentPosition, date.ToString(), metadata));
+
+            return;
+        }
+
+        TimeOnly time = TokenizeTimeOnly();
+
+        //If no offset is provided, it will be set to +00:00 (AKA UTC).
+        //However, the tokenizer will flag it as 'local' if no offset was provided, to
+        //avoid potential ambiguity.
+        TimeSpan offset = TokenizeTimeOffset(ref metadata);
+
+        System.DateTimeOffset result = new(date, time, offset); //hook in later
+
+        TokenStream.Enqueue(new(TOMLTokenType.TimeStamp, CurrentPosition, CurrentPosition, result.ToString(), metadata));
+        //Console.WriteLine(result);
+    }
+
+
+
+    private TimeOnly BufferedTokenizeTimeOnly() //For timeonly, when input is partially buffered
+    {
+        //When control is passed to this method (and the input is valid),
+        //the input contains the hour component, and the peek is ':'.
+        
+        Span<char> buffer = stackalloc char[5]; //mm:ss
+        TOMLTokenMetadata metadata = TOMLTokenMetadata.TimeOnly;
+
+        Reader.Read(); //Skip ':'
+
+        if (Reader.BaseReader.ReadBlock(buffer) != 5)
+        {
+            TempErrorLogger.Value.Add("Invalid time format.");
+            Synchronize(LF);
+            return TimeOnly.MinValue;
+        }
+
+
+        if (!TimeOnly.TryParseExact(buffer, "mm:ss", out var time))
+        {
+            TempErrorLogger.Value.Add("Invalid time value");
+            Synchronize(LF);
+            return TimeOnly.MinValue;
+        }
+
+        time = time.AddHours(int.Parse(Reader.GetBuffer()));
+
+        if (Reader.MatchNext(Dot))
+            time = time.Add(TimeSpan.FromTicks(TokenizeFracSeconds()));
+
+
+        //TMP
+        System.DateTimeOffset result =  new(DateOnly.MinValue, time, TokenizeTimeOffset(ref metadata));
+        TokenStream.Enqueue(new(TOMLTokenType.TimeStamp, CurrentPosition, CurrentPosition, result.ToString(), metadata));
+
+
+
+        return time;
+
+
+        //the actual result will be a datetimeoffset with a zeroed date when the toml date is done
+    }
+
+
+    private TimeOnly TokenizeTimeOnly()
+    {
+        //When control is passed to this method the delimiter (if any) should already be consumed
+        Span<char> buffer = stackalloc char[8];
+
+        if (Reader.BaseReader.ReadBlock(buffer) != 8)
+        {
+            TempErrorLogger.Value.Add("Invalid time format.");
+            Synchronize(LF);
+            return TimeOnly.MinValue;
+        }
+
+
+        if (!TimeOnly.TryParseExact(buffer, "hh:mm:ss", out var time))
+        {
+            TempErrorLogger.Value.Add("Invalid time value");
+            Synchronize(LF);
+            return TimeOnly.MinValue;
+        }
+
+
+        if (Reader.MatchNext(Dot))
+            time = time.Add(TimeSpan.FromTicks(TokenizeFracSeconds()));//returns the fractionals seconds in ticks
+
+        return time;
+    }
+
+
+    private TimeSpan TokenizeTimeOffset(ref TOMLTokenMetadata metadata)
+    {
+        TimeSpan result = TimeSpan.Zero;
+        bool maybeUnkown = false;
+
+        switch (Reader.Peek())
+        {
+            case 'Z':
+                Reader.Read();
+                break;
+
+            case '-':
+                maybeUnkown = true;
+                goto case '+';
+            case '+':
+                Span<char> buffer = stackalloc char[6];
+                if (Reader.BaseReader.ReadBlock(buffer) != 6)
+                {
+                    TempErrorLogger.Value.Add("Invalid time offset format");
+                    Synchronize(LF);
+                }
+
+                if (!TimeSpan.TryParse(buffer[0] is '+' ? buffer[1..] : buffer, out result)) //Because TryParse fails on '+'. However '-' is fine.
+                {
+                    TempErrorLogger.Value.Add("Invalid time offset");
+                    Synchronize(LF);
+                }
+                break;
+
+            default:
+                metadata |= TOMLTokenMetadata.Local;
+                break;
+        }
+
+        if(result == TimeSpan.Zero && maybeUnkown) //The offset -00:00 is a convention for unkown offsets
+            metadata |= TOMLTokenMetadata.UnkownLocal;
+        
+        return result;
+    }
+
+
+    private int TokenizeFracSeconds()
+    {
+        int ticks = 0, i = 0;
+
+        for (; i < 5 && IsAsciiDigit(Reader.Peek()); i++) //frac sec max prec is 6 digits
+        {
+            ticks *= 10;
+            ticks += (Reader.Read() - 0x30);
+        }
+
+        ticks *= (int)Math.Pow(10, 5 - i);
+
+        //Console.WriteLine(ticks + "ns (" + (ticks / 100) + " ticks)");
+
+
+        if (IsAsciiDigit(Reader.Peek()))
+        {
+            TempErrorLogger.Value.Add("Fractional seconds are only supported up to 5 digits, since 1 tick in .NET equals 100 nanoseconds. Value has been truncated.");
+            while (IsAsciiDigit(Reader.Peek())) //Truncate any additional parts, as per spec
+                Reader.Read();
+        }
+
+        return ticks;
     }
 
 
@@ -1043,7 +1343,6 @@ sealed class TOMLTokenizer
         vsb.Append((char)codePoint);
     }
 
-
     private int ToUnicodeCodepoint(int length)
     {
         Span<char> buffer = stackalloc char[length];
@@ -1082,79 +1381,82 @@ sealed class TOMLTokenizer
         return codePoint;
     }
 
-
     private static bool IsBareKey(char c) => IsAsciiLetter(c) || IsAsciiDigit(c) || c is '-' or '_';
     private static bool IsKey(char c) => IsBareKey(c) || c is '"' or '\'';
+
     /*private static TTable ResolveKey(TTable root, in ReadOnlySpan<char> str)
-    {
-        TTable containingTable = root;
-        int start = 0;
+{
+   TTable containingTable = root;
+   int start = 0;
 
-        if (!str.Contains('.'))
-            ProcessFragment(in str, start, str.Length);
+   if (!str.Contains('.'))
+       ProcessFragment(in str, start, str.Length);
 
-        else
-        {
-            for (int i = 0; i < str.Length; i++)
-            {
-                if (i == str.Length - 1)
-                    ProcessFragment(in str, start, i + 1);
+   else
+   {
+       for (int i = 0; i < str.Length; i++)
+       {
+           if (i == str.Length - 1)
+               ProcessFragment(in str, start, i + 1);
 
-                if (str[i] == '.')
-                {
-                    ProcessFragment(in str, start, i);
-                    ++i;
-                    start = i;
-                }
-            }
-        }
+           if (str[i] == '.')
+           {
+               ProcessFragment(in str, start, i);
+               ++i;
+               start = i;
+           }
+       }
+   }
 
-        return containingTable;
+   return containingTable;
 
-        void ProcessFragment(in ReadOnlySpan<char> str, int start, int end)
-        {
-            if (containingTable.Values.ContainsKey(str[start..end].ToString()))
-                containingTable = (TTable)containingTable[str[start..end]];
-            else
-            {
-                TTable subtable = [];
-                containingTable.Values.Add(str[start..end].ToString(), subtable);
-                containingTable = subtable;
-            }
-        }}*/
+   void ProcessFragment(in ReadOnlySpan<char> str, int start, int end)
+   {
+       if (containingTable.Values.ContainsKey(str[start..end].ToString()))
+           containingTable = (TTable)containingTable[str[start..end]];
+       else
+       {
+           TTable subtable = [];
+           containingTable.Values.Add(str[start..end].ToString(), subtable);
+           containingTable = subtable;
+       }
+   }}*/
 }
 
 enum TOMLTokenType
 {
-    Comment,
-    Key,
-    TableDecl,
     Table,
-    ArrayStart,
-    ArrayEnd,
+    TableDecl,
     ArrayTable,
     ArrayTableDecl,
+    InlineTableStart,
+    InlineTableEnd,
+    ArrayStart,
+    ArrayEnd,
+    Key,
     String,
     Integer,
     Float,
     Bool,
-    DateTime,
-    Undefined,
+    TimeStamp,
+    Comment,
     Eof,
+    Undefined,
 }
 
 [Flags]
-enum TOMLTokenMetadata
+public enum TOMLTokenMetadata
 {
     None = 0,
     QuotedKey = 1,
+    QuotedLiteralKey = QuotedKey | Literal,
     Multiline = 2,
     Literal = 4,
     MultilineLiteral = Multiline | Literal,
     DateOnly = 8,
     TimeOnly = 16,
-    DateTimeLocal = 32,
-    DateTimeOffset = 64,
+    Local = 32,
+    UnkownLocal = 64,
     Hex = 128,
     Octal = 256,
     Binary = 512,
@@ -1170,20 +1472,20 @@ readonly record struct TOMLToken : IEquatable<TOMLToken>
 
     internal string? Payload { get; init; }
 
-    internal (int Line, int Column) Position { get; init; }
+    internal (int Line, int Column) Start { get; init; }
+
+    internal (int Line, int Column) End { get; init; }
 
     internal TOMLTokenMetadata Metadata { get; init; }
 
-    public TOMLToken(TOMLTokenType type, int ln, int col, in ReadOnlySpan<char> payload, TOMLTokenMetadata? metadata = null)
+    public TOMLToken(TOMLTokenType type, (int l, int c) start, (int l, int c) end, in ReadOnlySpan<char> payload, TOMLTokenMetadata? metadata = null)
     {
         TokenType = type;
-        Position = (ln, col);
+        Start = (start.l, start.c);
+        End = (end.l, end.c);
         Payload = payload == ReadOnlySpan<char>.Empty ? null : payload.ToString();
         Metadata = metadata ?? TOMLTokenMetadata.None;
     }
 
-    public override string ToString()
-    {
-        return $"Type: {TokenType} | Value: '{Payload ?? "None"}'";
-    }
+    public override string ToString() => $"Type: {TokenType,-14} | Value: '{Payload ?? "[N/A]"}'";
 }
