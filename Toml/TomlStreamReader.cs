@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Transactions;
 
 namespace Toml
 {
@@ -38,7 +39,7 @@ namespace Toml
             switch (Peek())
             {
                 case ' ' or '\t':
-                case '\r' when skipNewLine && PeekNext() is '\n': //annoying fucking windows crlf line endings
+                case '\r' when skipNewLine && PeekNext() is '\n': //annoying windows crlf line endings
                 case '\n' when skipNewLine:                       //normal person line ending
                     Read(); goto SKIP;
                 default: return;
@@ -70,6 +71,25 @@ namespace Toml
                     return (char)readResult;
             }
         }
+
+        public int ReadBlock(Span<char> buffer)
+        {
+            int readResult = BaseReader.ReadBlock(buffer);
+
+            int lineIndex = buffer.IndexOf('\n'); //It doesn't matter whether it's a CR or CRLF line-ending, just need to know if there was one or not
+
+            if(lineIndex >= 0)
+            {
+                Line += 1;
+                Column = readResult - lineIndex + 1; //1 + because of zero-based indexing.
+            }
+
+            else
+                Column += readResult;
+            
+            return readResult;
+        }
+
 
         /// <summary>
         /// Returns the next available character, consuming it. Ignores tab or skip.
@@ -213,7 +233,7 @@ namespace Toml
 
 
         /// <summary>
-        /// Initializes a secondary buffer and fills it with the next <paramref name="charCount"/> characters from the input stream
+        /// Initializes the secondary buffer and fills it with the next <paramref name="charCount"/> characters from the input stream
         /// </summary>
         public void BufferFill(int charCount)
         {
