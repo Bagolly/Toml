@@ -34,6 +34,7 @@ sealed class TOMLTokenizer
     internal const char Dash = '-';
     internal const char EqualsSign = '=';
     internal const char Dot = '.';
+    internal const char Semicolon = ':';
     internal const char Comma = ',';
     internal const char SquareOpen = '[';
     internal const char SquareClose = ']';
@@ -411,7 +412,7 @@ sealed class TOMLTokenizer
                     return;
 
                 default:
-                    ErrorLog.Value.Add($"Could find a parse method for value token {Reader.PeekSkip()}");
+                    ErrorLog.Value.Add($"No TOML value may start with the token '{Reader.PeekSkip()}'");
                     Synchronize(LF);
                     return;
             }
@@ -1073,6 +1074,7 @@ sealed class TOMLTokenizer
         TOMLTokenMetadata metadata = TOMLTokenMetadata.None;
         Span<char> buffer = stackalloc char[5];
 
+
         if (Reader.ReadBlock(buffer) != 5)
         {
             ErrorLog.Value.Add("Invalid date format.");
@@ -1092,7 +1094,6 @@ sealed class TOMLTokenizer
 
         if (!IsAsciiDigit(Reader.PeekSkip()) && !Reader.MatchNext('T'))
         {
-
             metadata |= TOMLTokenMetadata.DateOnly;
 
 
@@ -1102,14 +1103,17 @@ sealed class TOMLTokenizer
             return;
         }
 
+
         TimeOnly time = TokenizeTimeOnly();
 
-        //If no offset is provided, it will be set to +00:00 (AKA UTC).
+        //If no offset is provided, it will be TimeSpan.Zero. Since UTC is also zero, there could be ambiguity between
+        //a datetime with an offset of UTC, and datetime with no offset, which is why the metadata is checked as well.
         TimeSpan offset = TokenizeTimeOffset(ref metadata);
 
 
         if (metadata is TOMLTokenMetadata.Local)
             Add(new TDateTime(new(date, time)));
+        
         else
             Add(new TDateTimeOffset(new(date, time, offset)));
 
@@ -1125,24 +1129,27 @@ sealed class TOMLTokenizer
         Span<char> buffer = stackalloc char[5]; //mm:ss
         TOMLTokenMetadata metadata = TOMLTokenMetadata.TimeOnly;
 
-        Reader.Read(); //Skip ':'
+        Debug.Assert(Reader.Read() is Semicolon); //Consume ':'
 
         if (Reader.ReadBlock(buffer) != 5)
         {
             ErrorLog.Value.Add("Invalid time format.");
             Synchronize(LF);
-            return TimeOnly.MinValue;
+            return default;
         }
 
 
         if (!TimeOnly.TryParseExact(buffer, "mm:ss", out var time))
-        {
+        {   
+
             ErrorLog.Value.Add("Invalid time value");
             Synchronize(LF);
-            return TimeOnly.MinValue;
+            return default;
         }
 
+
         time = time.AddHours(int.Parse(Reader.GetBuffer()));
+
 
         if (Reader.MatchNext(Dot))
             time = time.Add(TimeSpan.FromTicks(TokenizeFracSeconds()));
@@ -1153,8 +1160,6 @@ sealed class TOMLTokenizer
 
 
         return time;
-
-        //the actual result will be a datetimeoffset with a zeroed date when the toml date is done
     }
 
 
@@ -1167,20 +1172,21 @@ sealed class TOMLTokenizer
         {
             ErrorLog.Value.Add("Invalid time format.");
             Synchronize(LF);
-            return TimeOnly.MinValue;
+            return default;
         }
 
 
-        if (!TimeOnly.TryParseExact(buffer, "hh:mm:ss", out var time))
+        if (!TimeOnly.TryParseExact(buffer, "HH:mm:ss", out var time))
         {
+            Console.WriteLine("failed: " + buffer.ToString());
             ErrorLog.Value.Add("Invalid time value");
             Synchronize(LF);
-            return TimeOnly.MinValue;
+            return default;
         }
 
 
         if (Reader.MatchNext(Dot))
-            time = time.Add(TimeSpan.FromTicks(TokenizeFracSeconds()));//returns the fractionals seconds in ticks
+            time = time.Add(TimeSpan.FromTicks(TokenizeFracSeconds()));
 
         return time;
     }
@@ -1200,6 +1206,7 @@ sealed class TOMLTokenizer
             case '-':
                 isUnkownOffset = true;
                 goto case '+';
+            
             case '+':
                 Span<char> buffer = stackalloc char[6];
                 if (Reader.ReadBlock(buffer) != 6)
@@ -1208,7 +1215,8 @@ sealed class TOMLTokenizer
                     Synchronize(LF);
                 }
 
-                if (!TimeSpan.TryParse(buffer[0] is '+' ? buffer[1..] : buffer, out result)) //Because TryParse fails on '+'. However '-' is fine. (Don't ask why)
+                //TryParse fails on '+', however '-' is fine. (Don't ask why)
+                if (!TimeSpan.TryParse(buffer[0] is '+' ? buffer[1..] : buffer, out result)) 
                 {
                     ErrorLog.Value.Add("Invalid time offset");
                     Synchronize(LF);
@@ -1250,7 +1258,9 @@ sealed class TOMLTokenizer
         if (IsAsciiDigit(Reader.Peek()))
         {
             ErrorLog.Value.Add("Fractional seconds are only supported up to 7 digit precision; value was truncated.");
-            while (IsAsciiDigit(Reader.Peek())) //Truncate any additional parts, as per spec
+            
+            //Truncate any additional parts, as per spec
+            while (IsAsciiDigit(Reader.Peek()))
                 Reader.Read();
         }
 
@@ -1302,7 +1312,8 @@ sealed class TOMLTokenizer
         //When control is passed to this method, only the numeric sequence remains (without '\' and 'U')
         int codePoint = ToUnicodeCodepoint(8);
 
-        if (codePoint > MaxValue) //UTF-32 escape sequence, encode to surrogate pair
+        //UTF-32 escape sequence, encode to surrogate pair
+        if (codePoint > MaxValue)
         {
             codePoint -= 0x10_000;
             vsb.Append((char)((codePoint >> 10) + 0xD800));
