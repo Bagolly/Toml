@@ -138,7 +138,7 @@ sealed class TOMLParser
             throw new Exception("Could not resolve the name of the table, possibly because of a syntax error.");
 
 
-        if (Values[keyToken.ValueIndex] is not TFragment key)
+        if (keyToken.TokenType == Eof || Values[keyToken.ValueIndex] is not TFragment key)
             throw new Exception($"Expected a table declaration, but found a token of type <{keyToken.TokenType}>");
 
 
@@ -167,7 +167,7 @@ sealed class TOMLParser
             throw new Exception("Could not resolve the name of the arraytable, possibly because of a syntax error.");
 
 
-        if (Values[keyToken.ValueIndex] is not TFragment key)
+        if (keyToken.TokenType == Eof || Values[keyToken.ValueIndex] is not TFragment key)
             throw new Exception($"Expected a table declaration, but found a token of type <{keyToken.TokenType}>");
 
 
@@ -200,7 +200,7 @@ sealed class TOMLParser
             throw new Exception("Not enough tokens to resolve the key/value pair, possibly because of a syntax error.");
 
 
-        if (Values[keyToken.ValueIndex] is not TFragment key)
+        if (keyToken.TokenType == Eof || Values[keyToken.ValueIndex] is not TFragment key)
             throw new Exception($"Expected a key to start a key/value pair, but found a token of type <{keyToken.TokenType}>");
 
 
@@ -252,7 +252,7 @@ sealed class TOMLParser
     {
         //When control is passed to this method, InlineTableStart is already consumed.
 
-        TTable inlineTable = [];
+        TTable inlineTable = new();
 
         while (TokenStream.TryPeek(out var token))
         {
