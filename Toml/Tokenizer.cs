@@ -6,6 +6,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
 using System.Reflection.Metadata;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading;
 using Toml.Runtime;
@@ -29,7 +30,7 @@ sealed class TOMLTokenizer
     internal const char Comment = '#';
     internal const char DoubleQuote = '"';
     internal const char SingleQuote = '\'';
-    internal const char UnderScore = '_';
+    internal const char Underscore = '_';
     internal const char Dash = '-';
     internal const char EqualsSign = '=';
     internal const char Dot = '.';
@@ -214,7 +215,7 @@ sealed class TOMLTokenizer
 
 
     private void TokenizeKeyValuePair()
-    {
+    {   
         TokenizeKey(TomlTokenType.Key);          //Tokenize the keyvaluepair's key
 
         if (!Reader.MatchNextSkip(EqualsSign))
@@ -230,7 +231,8 @@ sealed class TOMLTokenizer
     /// <summary>
     /// <paramref name="keyType"/>: marks whether the key is part of a table or arraytable declaration, or a simple key.
     /// </summary>
-    private void TokenizeKey(TomlTokenType keyType) //TODO: might be good candidate for inlining (relatively short, no trycatch or state etc., only 3 callsites), needs testing!
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void TokenizeKey(TomlTokenType keyType)
     {
         //Control is passed to this method from:
         //1. When a top-level key is found, passed as: Tokenize()->TokenizeKeyValuePair()->TokenizeKey().
@@ -244,23 +246,24 @@ sealed class TOMLTokenizer
             return;
         }
 
-
-        //This part was overhauled to make parsing easier. In a dotted key, every fragment refers to a table,
-        //apart from the last, which can be a table, arraytable or key.
-        //
-        //So to make parsing (and code reuse) easier, every fragment in a dotted key is parsed as a table,
-        //apart from the last, which will be a normal key.
-        //
-        //Furthermore, ArrayTableDecl and TableDecl was repurposed; now every key fragment inside '[ ]' or '[[ ]]'
-        //will be tokenized as the respective 'Decl' version of its type.
-        //This makes enforcing the no-redeclaration rule for tables and arraytables easier in the parser.
+        /* 
+           This part was overhauled to make parsing easier. In a dotted key, every fragment refers to a table,
+           apart from the last, which can be a table, arraytable or key.
+        
+           So to make parsing (and code reuse) easier, every fragment in a dotted key is parsed as a table,
+           apart from the last, which will be a normal key.
+        
+           Furthermore, ArrayTableDecl and TableDecl was repurposed; now every key fragment inside '[ ]' or '[[ ]]'
+           will be tokenized as the respective 'Decl' version of its type.
+           This makes enforcing the no-redeclaration rule for tables and arraytables easier in the parser.
+        */
         while (true)
         {
-            var resolvedMetadata = TokenizeKeyFragment(); //Note: this also adds the key itself to the value list. The structural token is added here afterwards.
+            //Note: this also adds the key itself to the value list. The structural token is added here afterwards.
+            var resolvedMetadata = TokenizeKeyFragment(); 
 
             if (!Reader.MatchNextSkip(Dot))
             {
-                //Console.WriteLine("Passed type: " + keyType);
                 TokenStream.Enqueue(new(keyType, ValueIndex, resolvedMetadata));
                 break;
             }
@@ -312,8 +315,6 @@ sealed class TOMLTokenizer
                     break;
             }
 
-
-            //avoid using rawchars, because of lack of null termination. (RawChars length will equal the builderss stackallocated length, currently 64)
             Add(new TFragment(vsb.ToString(), vsb.Length));
             return keyMetadata;
         }
@@ -337,7 +338,7 @@ sealed class TOMLTokenizer
                         //One doublequote; basic string
                         case 1:
                             TokenizeBasicString(ref buffer);
-                            Add(new TString(buffer.RawChars));
+                            Add(new TString(buffer.AsSpan()));
                             TokenStream.Enqueue(new(TomlTokenType.String, ValueIndex));
                             break;
 
@@ -351,7 +352,7 @@ sealed class TOMLTokenizer
                         //Three doublequotes; multiline string
                         case >= 3:
                             TokenizeMultiLineBasicString(ref buffer);
-                            Add(new TString(buffer.RawChars));
+                            Add(new TString(buffer.AsSpan()));
                             TokenStream.Enqueue(new(TomlTokenType.String, ValueIndex, TOMLTokenMetadata.Multiline));
                             break;
 
@@ -369,7 +370,7 @@ sealed class TOMLTokenizer
                     {
                         case 1: //One singlequote; basic literal string
                             TokenizeLiteralString(ref buffer);
-                            Add(new TString(buffer.RawChars));
+                            Add(new TString(buffer.AsSpan()));
                             TokenStream.Enqueue(new(TomlTokenType.String, ValueIndex, TOMLTokenMetadata.Literal));
                             break;
                         case 2: //Two singlequotes cannot start any string
@@ -377,7 +378,7 @@ sealed class TOMLTokenizer
                             goto ERR_SYNC;
                         case >= 3: //Three singlequotes; multiline literal string
                             TokenizeMultiLineLiteralString(ref buffer);
-                            Add(new TString(buffer.RawChars));
+                            Add(new TString(buffer.AsSpan()));
                             TokenStream.Enqueue(new(TomlTokenType.String, ValueIndex, TOMLTokenMetadata.MultilineLiteral));
                             break;
                         default:
@@ -423,19 +424,44 @@ sealed class TOMLTokenizer
     {
         Reader.Read(); //Consume opening curly bracket
 
+
         TokenStream.Enqueue(new(TomlTokenType.InlineTableStart, -1));
 
 
-        if (Reader.MatchNextSkip(CurlyClose))
+        if (Reader.MatchNextSkip(CurlyClose)) //short circuit on empty inline tables
         {
             TokenStream.Enqueue(new(TomlTokenType.InlineTableEnd, -1));
             return;
         }
 
-        do { TokenizeKeyValuePair(); } while (Reader.MatchNextSkip(Comma));
 
-        Reader.SkipWhiteSpace();
+        if( Reader.PeekSkip() is Comma) 
+        {
+            ErrorLog.Value.Add("Empty inline tables cannot contain separators.");
+            TokenStream.Enqueue(new(TomlTokenType.InlineTableEnd, -1));
+            Synchronize(LF);
+            return;
+        }
 
+
+        do 
+        {   
+            if(Reader.PeekSkip() is CurlyClose)
+            {
+                ErrorLog.Value.Add("Inline tables cannot contain trailing commas.");
+                TokenStream.Enqueue(new(TomlTokenType.InlineTableEnd, -1));
+                Synchronize(LF);
+                return;
+            }
+
+            TokenizeKeyValuePair();
+
+        } while (Reader.MatchNextSkip(Comma));
+
+
+
+        Reader.SkipWhiteSpace(); //Better to call once here, so MatchNext() doesn't 'step on' MatchLineEnding() 
+         
         if (Reader.MatchNext(CurlyClose))
             TokenStream.Enqueue(new(TomlTokenType.InlineTableEnd, -1));
 
@@ -453,7 +479,6 @@ sealed class TOMLTokenizer
     {
         Reader.Read(); //Consume opening [
         TokenStream.Enqueue(new(TomlTokenType.ArrayStart, -1));
-        int elementCount = 0;
 
         do
         {
@@ -469,7 +494,6 @@ sealed class TOMLTokenizer
             }
 
             TokenizeValue();
-            ++elementCount;
         } while (Reader.MatchLineEnding() || Reader.MatchNextSkip(Comma));
 
         if (!Reader.MatchNextSkip(SquareClose))
@@ -480,9 +504,7 @@ sealed class TOMLTokenizer
         }
 
         else
-        {
             TokenStream.Enqueue(new(TomlTokenType.ArrayEnd, -1));
-        }
     }
 
 
@@ -718,7 +740,7 @@ sealed class TOMLTokenizer
             default: throw new ArgumentException("If this got thrown, I'm a fucking idiot."); //Internal usage rules *should* prevent this from triggering. Times this got thrown counter: [0]
         }
 
-        if (vsb.RawChars[^1] is '_')
+        if (vsb.AsSpan()[^1] is '_')
         {
             ErrorLog.Value.Add("Numbers cannot end on an underscore.");
             Synchronize(LF);
@@ -865,21 +887,21 @@ sealed class TOMLTokenizer
 
                 case 'x':
                     TokenizeInteger(ref vsb, TOMLTokenMetadata.Hex, useBuffer);
-                    Add(new TInteger(vsb.RawChars[..vsb.Length]));
+                    Add(new TInteger(vsb.AsSpan()));
                     TokenStream.Enqueue(new(TomlTokenType.Integer, ValueIndex, TOMLTokenMetadata.Hex));
                     return;
 
                 case 'b':
                     TokenizeInteger(ref vsb, TOMLTokenMetadata.Binary, useBuffer);
 
-                    Add(new TInteger(vsb.RawChars[..vsb.Length]));
+                    Add(new TInteger(vsb.AsSpan()));
                     TokenStream.Enqueue(new(TomlTokenType.Integer, ValueIndex, TOMLTokenMetadata.Binary));
                     return;
 
                 case 'o':
                     TokenizeInteger(ref vsb, TOMLTokenMetadata.Octal, useBuffer);
 
-                    Add(new TInteger(vsb.RawChars[..vsb.Length]));
+                    Add(new TInteger(vsb.AsSpan()));
                     TokenStream.Enqueue(new(TomlTokenType.Integer, ValueIndex, TOMLTokenMetadata.Octal));
                     return;
 
@@ -909,7 +931,7 @@ sealed class TOMLTokenizer
             if (Reader.Peek(useBuffer) is not ('.' or 'e' or 'E')) //Decimal integer
             {
                 //TokenStream.Enqueue(new(TomlTokenType.Integer,  vsb.RawChars));
-                Add(new TInteger(vsb.RawChars[..vsb.Length]));
+                Add(new TInteger(vsb.AsSpan()));
                 TokenStream.Enqueue(new(TomlTokenType.Integer, ValueIndex, null));
                 return;
             }
@@ -968,14 +990,14 @@ sealed class TOMLTokenizer
                     goto case 'e';
                 }
 
-                Add(new TFloat(vsb.RawChars[..vsb.Length]));
+                Add(new TFloat(vsb.AsSpan()));
                 TokenStream.Enqueue(new(TomlTokenType.Float, ValueIndex));
                 return;
 
             case 'E': //Exponent
             case 'e':
                 TokenizeExponent(ref vsb, useBuffer);
-                Add(new TFloat(vsb.RawChars[..vsb.Length]));
+                Add(new TFloat(vsb.AsSpan()));
                 TokenStream.Enqueue(new(TomlTokenType.Float, ValueIndex, TOMLTokenMetadata.FloatHasExponent));
                 return;
         }
@@ -1090,7 +1112,7 @@ sealed class TOMLTokenizer
             Add(new TDateTime(new(date, time)));
         else
             Add(new TDateTimeOffset(new(date, time, offset)));
-        
+
         TokenStream.Enqueue(new(TomlTokenType.TimeStamp, ValueIndex, metadata));
     }
 
@@ -1124,7 +1146,6 @@ sealed class TOMLTokenizer
 
         if (Reader.MatchNext(Dot))
             time = time.Add(TimeSpan.FromTicks(TokenizeFracSeconds()));
-
 
 
         Add(new TTimeOnly(time));
@@ -1208,22 +1229,27 @@ sealed class TOMLTokenizer
 
     private int TokenizeFracSeconds()
     {
-        int ticks = 0, i = 0;
-
-        for (; i < 5 && IsAsciiDigit(Reader.Peek()); i++) //frac sec max prec is 6 digits
+        int ticks = 0, i = 0; //1 .NET tick is 100ns
+        int coeff = 1_000_000;
+    
+        //Milliseconds: digits 0,1,2
+        //Microseconds: digits 3,4,5
+        //Nanoseconds:  digits 6,7,8
+        for (; i < 7 && IsAsciiDigit(Reader.Peek()); i++)
         {
-            ticks *= 10;
-            ticks += Reader.Read() - 0x30;
+            ticks += (Reader.Read() - 0x30) * coeff;
+            coeff /= 10;
         }
 
-        ticks *= (int)Math.Pow(10, 5 - i);
-
-        //Console.WriteLine(ticks + "ns (" + (ticks / 100) + " ticks)");
-
+        if(i == 0)
+        {
+            ErrorLog.Value.Add("Fractional second specifier '.' must be followed by at least one digit.");
+            return 0;
+        }
 
         if (IsAsciiDigit(Reader.Peek()))
         {
-            ErrorLog.Value.Add("Fractional seconds are only supported up to 5 digits, since 1 tick in .NET equals 100 nanoseconds. Value has been truncated.");
+            ErrorLog.Value.Add("Fractional seconds are only supported up to 7 digit precision; value was truncated.");
             while (IsAsciiDigit(Reader.Peek())) //Truncate any additional parts, as per spec
                 Reader.Read();
         }
@@ -1337,81 +1363,8 @@ sealed class TOMLTokenizer
     }
 
 
-    private static bool IsBareKey(char c) => IsAsciiLetter(c) || IsAsciiDigit(c) || c is '-' or '_';
+    private static bool IsBareKey(char c) => IsAsciiLetter(c) || IsAsciiDigit(c) || c is Dash or Underscore;
 
 
-    private static bool IsKey(char c) => IsBareKey(c) || c is '"' or '\'';
-
-}
-
-
-
-//2 basic token types: structural and value tokens.
-//Structural tokens hold no 'reference' (list index) to values in the value-list.
-//Value tokens are just bloated pointers with some optional extra metadata.
-enum TomlTokenType
-{
-    Eof,
-    ArrayStart,
-    ArrayEnd,
-    InlineTableStart,
-    InlineTableEnd,
-    Key,
-    Table,
-    ArrayTable,
-    TableDecl,
-    TableDeclStart,
-    ArrayTableDecl,
-    ArrayTableDeclStart,
-
-    TOKEN_SENTINEL, //Add new 'primitives' (tokens with no grammatical significance, only representing values) AFTER this value.
-
-    String,
-    Integer,
-    Float,
-    Bool,
-    TimeStamp,
-    Comment,
-}
-
-
-[Flags]
-public enum TOMLTokenMetadata
-{
-    None = 0,
-    QuotedKey = 1,
-    QuotedLiteralKey = QuotedKey | Literal,
-    Multiline = 2,
-    Literal = 4,
-    MultilineLiteral = Multiline | Literal,
-    DateOnly = 8,
-    TimeOnly = 16,
-    Local = 32,
-    UnkownLocal = 64,
-    Hex = 128,
-    Octal = 256,
-    Binary = 512,
-    FloatInf = 1024,
-    FloatNan = 2048,
-    FloatHasExponent = 4096,
-}
-
-//Tokens are essentially bloated pointers, with some extra stored type information, to values in the value-list.
-//Structural tokens hold no reference (index is -1).
-readonly record struct TOMLValue : IEquatable<TOMLValue>
-{
-    internal TomlTokenType TokenType { get; init; }
-
-    internal int ValueIndex { get; init; }
-
-    internal TOMLTokenMetadata Metadata { get; init; }
-
-    public TOMLValue(TomlTokenType type, int vIndex, TOMLTokenMetadata? metadata = null)
-    {
-        TokenType = type;
-        ValueIndex = vIndex;
-        Metadata = metadata ?? TOMLTokenMetadata.None;
-    }
-
-    public override string ToString() => $"Type: {TokenType,-14} | ValueIndex: {ValueIndex}";
+    private static bool IsKey(char c) => IsBareKey(c) || c is DoubleQuote or SingleQuote;
 }
