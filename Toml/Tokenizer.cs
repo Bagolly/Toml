@@ -1348,15 +1348,17 @@ sealed class TOMLTokenizer
 
         for (int i = 0; i < length; i++)
         {
-            int digit = buffer[i] < 0x3A ? buffer[i] - 0x30 : (buffer[i] & 0x5F) - 0x37; //Convert char to hexadecimal digit
+            //Convert char to hexadecimal digit
+            int digit = buffer[i] < 0x3A ? buffer[i] - 0x30 : (buffer[i] & 0x5F) - 0x37;
 
-            if (digit < 0 || digit > 15)
+            if ((uint)digit > 15)
             {
                 ErrorLog.Value.Add($"{i + 1}. character '{buffer[i]}' in escape sequence is not a hexadecimal digit.");
                 Synchronize(Space);
             }
 
-            codePoint = (codePoint << 4) + digit; //Build up codepoint from digits
+            //Build up codepoint from digits
+            codePoint = (codePoint << 4) + digit;
         }
 
         return codePoint;
