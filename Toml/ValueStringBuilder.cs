@@ -93,7 +93,7 @@ namespace Toml
         }
 
         /// <summary>
-        /// [<see langword="CAUTION"/>!] use this carefully, the returned span will be the allocated buffer,
+        /// [<see langword="CAUTION"/>] Use this carefully, the returned span will be the allocated buffer,
         /// NOT the characters written to it!
         /// </summary>
         private readonly Span<char> RawChars => _chars;
