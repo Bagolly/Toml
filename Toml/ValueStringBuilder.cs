@@ -5,9 +5,8 @@ using System.Runtime.InteropServices;
 
 namespace Toml
 {
-    //.NET internal code
-    //Uses a stack-allocated buffer of the assigned capacity, and rents an array from the shared arraypool
-    //if in need of additional memory.
+    //Modified .NET internal code.
+    //Uses a stack-allocated buffer of the assigned capacity, and rents an array from the shared ArrayPool if more memory is needed.
     public ref struct ValueStringBuilder //MUST BE PASSED AS REF WHEN ARGUMENT!
     {
         private char[]? _arrayToReturnToPool;
