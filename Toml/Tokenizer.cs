@@ -1083,14 +1083,15 @@ sealed class TOMLTokenizer
         TimeOnly time = TokenizeTimeOnly();
 
         //If no offset is provided, it will be set to +00:00 (AKA UTC).
-        //However, the tokenizer will flag it as 'local' if no offset was provided, to
-        //avoid potential ambiguity.
         TimeSpan offset = TokenizeTimeOffset(ref metadata);
 
 
-        Add(new TDateTimeOffset(new(date, time, offset)));
+        if (metadata is TOMLTokenMetadata.Local)
+            Add(new TDateTime(new(date, time)));
+        else
+            Add(new TDateTimeOffset(new(date, time, offset)));
+        
         TokenStream.Enqueue(new(TomlTokenType.TimeStamp, ValueIndex, metadata));
-        //Console.WriteLine(result);
     }
 
 
