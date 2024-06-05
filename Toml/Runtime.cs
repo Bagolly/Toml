@@ -1,5 +1,7 @@
 ﻿using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Toml.Tokenization;
 using static Toml.Runtime.TOMLExceptionHandler;
 #pragma warning disable IDE0290
@@ -14,7 +16,7 @@ public abstract class TObject
     {
         String, Integer, Float, Boolean,
         DateTimeOffset, DateTimeLocal, TimeOnly, DateOnly,
-        Array, InlineTable, Table, Key
+        Array, InlineTable, Table, ArrayTable, Key
     }
 
     public virtual TOMLType Type { get; protected init; }
@@ -31,9 +33,9 @@ public abstract class TValue<T> : TObject
 
     public override string ToString() => $"{(Value is null ? "null" : Value)}";
 
-    public override TObject this[string index] { get => throw new InvalidOperationException(MessageFor[ErrorCode.ValueTypeIndexed]); set => throw new InvalidOperationException(MessageFor[ErrorCode.ValueTypeIndexed]); }
+    public override TObject this[string index] { get => throw new InvalidOperationException(MessageFor[RuntimeError.ValueTypeIndexed]); set => throw new InvalidOperationException(MessageFor[RuntimeError.ValueTypeIndexed]); }
 
-    public override TObject this[int index] { get => throw new InvalidOperationException(MessageFor[ErrorCode.ValueTypeIndexed]); set => throw new InvalidOperationException(MessageFor[ErrorCode.ValueTypeIndexed]); }
+    public override TObject this[int index] { get => throw new InvalidOperationException(MessageFor[RuntimeError.ValueTypeIndexed]); set => throw new InvalidOperationException(MessageFor[RuntimeError.ValueTypeIndexed]); }
 }
 
 
@@ -44,12 +46,16 @@ public sealed class TArray : TObject, IEnumerable<TObject>, ITCollection
     public override TObject this[int index]
     {
         get => Values[index];
-        set => Values[index] = value;
+        set
+        {
+            if (Type == TOMLType.ArrayTable && value.Type != TOMLType.Table) //Most common case.
+                throw new InvalidOperationException($"Cannot add a value of type {value.Type}; arraytables can only hold tables.");
+
+            Values[index] = value;
+        }
     }
 
     public List<TObject> Values { get; init; }
-
-    public override TOMLType Type { get; protected init; }
 
     public IEnumerator<TObject> GetEnumerator() => Values.GetEnumerator();
 
@@ -67,10 +73,31 @@ public sealed class TArray : TObject, IEnumerable<TObject>, ITCollection
         Type = TOMLType.Array;
     }
 
-    public void Add(TObject value) => Values.Add(value);
 
+    public TArray(params TTable[] from)
+    {
+        Values = [..from];
+        Type = TOMLType.ArrayTable;
+    }
+
+
+    public TArray(TTable from)
+    {
+        Values = [from];
+        Type = TOMLType.ArrayTable;
+    }
+
+
+    public void Add(TObject value)
+    {   
+        if (Type == TOMLType.ArrayTable && value.Type != TOMLType.Table)
+            throw new InvalidOperationException($"Cannot add an element of type {value.Type}; arraytables may only contain tables.");
+
+        Values.Add(value);
+    }
     public void Add(string key, TObject? val) => throw new NotImplementedException("Can't add to array like a table");
 
+    public TObject GetLast() => Values[Values.Count - 1]; //Used in parser; a reference to an arraytable is a reference to its last defined table.
 
     public override string ToString() => $"TOMLArray with {Values.Count} elements.";
 }
@@ -78,7 +105,7 @@ public sealed class TArray : TObject, IEnumerable<TObject>, ITCollection
 
 public sealed class TTable : TObject, IEnumerable<KeyValuePair<string, TObject>>, ITCollection
 {
-    public override TObject this[int index] { get => throw new InvalidOperationException(MessageFor[ErrorCode.TableIndexedAsArray]); set => throw new InvalidOperationException(MessageFor[ErrorCode.TableIndexedAsArray]); }
+    public override TObject this[int index] { get => throw new InvalidOperationException(MessageFor[RuntimeError.TableIndexedAsArray]); set => throw new InvalidOperationException(MessageFor[RuntimeError.TableIndexedAsArray]); }
 
     public override TObject this[string index]
     {
@@ -98,13 +125,23 @@ public sealed class TTable : TObject, IEnumerable<KeyValuePair<string, TObject>>
     private void AddAssert(in ReadOnlySpan<char> key, TObject value)
     {
         if (Type is TOMLType.InlineTable)
-            throw new InvalidOperationException(MessageFor[ErrorCode.InlineNoExtend]);
+            throw new InvalidOperationException(MessageFor[RuntimeError.InlineNoExtend]);
+
+        Values.Add(key.ToString(), value);
+    }
+
+    private void AddAssert(string key, TObject value)
+    {
+        if (Type is TOMLType.InlineTable)
+            throw new InvalidOperationException(MessageFor[RuntimeError.InlineNoExtend]);
 
         Values.Add(key.ToString(), value);
     }
 
 
     public void Add(in ReadOnlySpan<char> key, TObject value) => AddAssert(in key, value);
+
+    public void Add(string key, TObject value) => AddAssert(key, value);
 
     internal void BuildKey(in ReadOnlySpan<char> key, TTable table) => Values.Add(key.ToString(), table);
 
@@ -123,8 +160,6 @@ public sealed class TTable : TObject, IEnumerable<KeyValuePair<string, TObject>>
     void ITCollection.Add(string key, TObject val) => Values.Add(key, val);
 
     void ITCollection.Add(TObject val) => throw new InvalidOperationException("Can't add to table like an array!");
-
-    public override TOMLType Type { get; protected init; }
 
     public TTable(bool isInline = false)
     {
@@ -212,20 +247,33 @@ public sealed class TString : TValue<string>, IEquatable<string?>
 }
 
 
-//Try to avoid this being part of public API because the rented array implementation makes it ripe for misuse and/or potential GC leaks
-internal sealed class TKey : TValue<string>, IEquatable<string>
+internal sealed class TFragment : TValue<string>, IEquatable<string>
 {
-    public TKey(in ReadOnlySpan<char> str, int length, TOMLType keyType)
+    public TFragment(in ReadOnlySpan<char> str, int length)
     {
         Value = new(str[..str.Length]);
-        Type = keyType;
+        Type = TOMLType.Key;
         Length = length; //Array's length will be different (unless string length is exactly a power of 2)
     }
 
     public int Length { get; init; }
 
-    public override bool Equals(object? obj) => obj is TKey other && this == other;
-    public override int GetHashCode() => HashCode.Combine(Value, Type); //This may cause entropy issues if Value is null?
+
+    /* Justification 
+     * Safe to suppress nullability check on the getter, the derived type (TKey) enforces the initialization
+     * of Value in the constructor. The setter is init-only, only the constructor will assign to Value.
+     * Since the constructor takes a non-nullable argument, and the string constructor used to assign to Value
+     * cannot return String?, Value is always definitely assigned, despite the base definition TValue<T>.Value being nullable (T?).
+     * However, the compiler (rightfully) cannot verify code relying on 'proper usage' to remain correct, hence the warning.
+     * (with 'proper usage' referring to the fact that the constructor definitely assigns Value).
+     * The main reason for this is to avoid having to null-forgive every 'unchecked' access to Value when using TKey in the parser.
+     */
+#pragma warning disable CS8765
+    public override string Value { get => base.Value!; protected init => base.Value = value; }
+#pragma warning restore CS8765
+
+    public override bool Equals(object? obj) => obj is TFragment other && this == other;
+    public override int GetHashCode() => HashCode.Combine(Value, Type); //This may cause uniqueness issues if Value is null?
     public bool Equals(string? other) => other == Value;
 }
 
@@ -259,7 +307,7 @@ public sealed class TFloat : TValue<double>, IEquatable<double>
         Value = value;
     }
 
-    public TFloat(in ReadOnlySpan<char> str) : this(double.Parse(str)) {} 
+    public TFloat(in ReadOnlySpan<char> str) : this(double.Parse(str)) { }
 
     public override bool Equals(object? obj) => obj is TFloat other && this == other;
 
@@ -352,25 +400,25 @@ public sealed class TDateOnly : TValue<DateOnly>, IEquatable<DateOnly>
 
 
 
-class TOMLExceptionHandler //Temporarily used to centralize handling of error strings
+class TOMLExceptionHandler
 {
-    //TODO: Move to assembly manifest
-    public static readonly Dictionary<ErrorCode, string> MessageFor = new()
+    //TODO: see about moving to assembly manifest
+    public static readonly Dictionary<RuntimeError, string> MessageFor = new()
     {
-        [ErrorCode.CommentInvalidControlChar] = "Tab (U+0020) is the only allowed control character in comments.",
-        [ErrorCode.CommentCRInvalid] = "Invalid CRLF line ending or stray carriage return in comment.",
-        [ErrorCode.BareKeyInvalid] = "Invalid character in key.",
-        [ErrorCode.KeyInvalid] = "An invalid character was found in a key token.",
-        [ErrorCode.KeyUndefined] = "A key was declared, but no value was defined.",
-        [ErrorCode.KeyInvalidSyntax] = "An invalid character was found after key declaration.",
-        [ErrorCode.InvalidTopLevelChar] = "Only key/value pairs, comments or table declarations can be at the root of a document.",
-        [ErrorCode.ArrayIndexedAsTable] = "Attempted to index an array as a table.",
-        [ErrorCode.TableIndexedAsArray] = "Attempted to index a table as an array",
-        [ErrorCode.ValueTypeIndexed] = "This type is not indexable.",
-        [ErrorCode.InlineNoExtend] = "Inline tables cannot be extended.",
+        [RuntimeError.CommentInvalidControlChar] = "Tab (U+0020) is the only allowed control character in comments.",
+        [RuntimeError.CommentCRInvalid] = "Invalid CRLF line ending or stray carriage return in comment.",
+        [RuntimeError.BareKeyInvalid] = "Invalid character in key.",
+        [RuntimeError.KeyInvalid] = "An invalid character was found in a key token.",
+        [RuntimeError.KeyUndefined] = "A key was declared, but no value was defined.",
+        [RuntimeError.KeyInvalidSyntax] = "An invalid character was found after key declaration.",
+        [RuntimeError.InvalidTopLevelChar] = "Only key/value pairs, comments or table declarations can be at the root of a document.",
+        [RuntimeError.ArrayIndexedAsTable] = "Attempted to index an array as a table.",
+        [RuntimeError.TableIndexedAsArray] = "Attempted to index a table as an array",
+        [RuntimeError.ValueTypeIndexed] = "This type is not indexable.",
+        [RuntimeError.InlineNoExtend] = "Inline tables cannot be extended.",
     };
 
-    public enum ErrorCode
+    public enum RuntimeError
     {
         CommentInvalidControlChar,
         CommentCRInvalid,
@@ -397,3 +445,5 @@ interface ITCollection
     public abstract TObject this[string index] { get; set; }
     public abstract TObject this[int index] { get; set; }
 }
+
+
