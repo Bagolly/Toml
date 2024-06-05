@@ -1,11 +1,11 @@
 ﻿global using System;
-using System.Collections.Generic;
+
 using System.Diagnostics;
 using System.IO;
-using System.Linq;
 using System.Text;
 using Toml.Tokenization;
-using Toml.Runtime;
+using Toml.Parser;
+using Toml.Extensions;
 
 namespace Toml;
 
@@ -36,32 +36,67 @@ internal class Program
         Console.WriteLine("Test2 | animal.lifespan: " + root["animal"]["lifespan"]);
         Console.WriteLine("Test3 | fruit.orange.color: " + root["fruit"]["orange"]["color"]);
         */
-
         using FileStream fs = new("C:/Users/BAGOLY/Desktop/TOML Project/TomlTest/working.txt", FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan);
 
         TOMLTokenizer t = new(fs);
         Stopwatch sw = Stopwatch.StartNew();
         var (tStream, values) = t.TokenizeFile();
+
+      //  foreach (var tkn in t.TokenStream)
+        //    Console.WriteLine(tkn);
+
+       
+
+
+        TOMLParser p = new(tStream, values);
+        var root = p.Parse();
         sw.Stop();
         Console.WriteLine("Elapsed: " + sw.ElapsedMilliseconds + "ms");
-        Console.ReadKey();
-        //Console.ForegroundColor = ConsoleColor.Red;
-        //   foreach (var msg in t.ErrorLog.Value)
-        //     Console.WriteLine(msg);
-        //Console.ResetColor();
+        //Console.ReadKey();
+        Console.ForegroundColor = ConsoleColor.Red;
+           foreach (var msg in t.ErrorLog.Value)
+             Console.WriteLine(msg);
+        Console.ResetColor();
 
         Console.OutputEncoding = Encoding.UTF8;
 
-        foreach (var token in t.TokenStream)
+
+
+        //parser result DEBUG
+        // foreach (var (key, val) in root)
+        // Console.WriteLine($"{key} = {val}");
+
+        //access DEBUG
+
+        Console.WriteLine("RESULT>>>   " + root["array"]);
+
+        foreach(var value in root["array"].AsArray())
+            Console.WriteLine($"Type: {value.Type}, Value: {value}");
+
+    
+      //  Console.WriteLine("Format: " + root["color"]["format"]);
+        //Console.WriteLine("Supports alpha: " + root["color"]["hasAlphaChannel"]);
+        //Console.WriteLine("# of channels (colors + alpha): " + ((TArray)root["color"]["channels"]).Count());
+
+
+
+        //key collection DEBUG
+        // foreach(var whatinthefuck in root.Values.Keys)
+          //  Console.WriteLine(whatinthefuck.Length);
+        
+        /*foreach (var token in t.TokenStream)
         {
             Console.WriteLine($"TOKEN: {token}");
 
             if (token.Metadata != TOMLTokenMetadata.None)
                 Console.WriteLine($"\tMETADATA:\t " + token.Metadata.ToString());
 
-            if (token.TokenType > TomlTokenType.STRUCTURAL_TOKEN_SENTINEL)
+            if (token.TokenType > TomlTokenType.TOKEN_SENTINEL)
                 Console.WriteLine($"\tPOINTS TO:\t {t.Values[token.ValueIndex]}");
-        }
+        }*/
+
+
+        
 
         /*Console.WriteLine(t.TokenStream.Count + " tokens parsed.");
         Console.WriteLine(t.Values.Count + " values stored.");
@@ -82,69 +117,5 @@ internal class Program
         writer.Flush();
         stream.Position = 0;
         return stream;
-    }
-
-    private static IEnumerable<(int start, int end)> GetKey(string str)
-    {
-        int start = 0;
-
-
-        for (int i = 0; i < str.Length; i++)
-        {
-            if (i == str.Length - 1) //if not dotted
-                yield return (start, i + 1);
-
-            else if (str[i] == '.')
-            {
-                yield return (start, i);
-                ++i;
-                start = i;
-            }
-            else
-                continue;
-        }
-    }
-
-    //Constructs a hierarchy of tables from a given key and
-    //returns a reference to the last added table (the active "scope").
-    //DO NOT PASS the key to the value you want to add. Instead, provide the path (all but the last fragment),
-    //then add the value to the table using the returned reference.
-    private static TTable ResolveKey(TTable root, in ReadOnlySpan<char> str)
-    {
-        TTable containingTable = root;
-        int start = 0;
-
-        if (!str.Contains('.'))
-            ProcessFragment(in str, start, str.Length);
-
-        else
-        {
-            for (int i = 0; i < str.Length; i++)
-            {
-                if (i == str.Length - 1)
-                    ProcessFragment(in str, start, i + 1);
-
-                if (str[i] == '.')
-                {
-                    ProcessFragment(in str, start, i);
-                    ++i;
-                    start = i;
-                }
-            }
-        }
-
-        return containingTable;
-
-        void ProcessFragment(in ReadOnlySpan<char> str, int start, int end)
-        {
-            if (containingTable.Values.ContainsKey(str[start..end].ToString()))
-                containingTable = (TTable)containingTable[str[start..end]];
-            else
-            {
-                TTable subtable = [];
-                containingTable.Values.Add(str[start..end].ToString(), subtable);
-                containingTable = subtable;
-            }
-        }
     }
 }
