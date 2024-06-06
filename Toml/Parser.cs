@@ -143,7 +143,7 @@ sealed class TOMLParser
 
 
         if (to.Values.TryGetValue(key.Value, out TObject? value))//todo: change to redecalrationexception
-            throw new Exception($"A value for the key '{key.Value}' already exists: {value} : {value.Type}");
+            throw new Exception($"A value for the key '{key.Value}' already exists: {value} (Type <{value.Type}>)");
 
 
         TTable table = new();
@@ -158,10 +158,8 @@ sealed class TOMLParser
         TokenStream.Dequeue(); //Dequeue declstart dummy token.
 
         if (TokenStream.Peek().TokenType == Table) //the path to the table is a dotted key.
-        {
             to = ResolvePath(origin: Root); //updte scope to the resolved path
-        }
-
+        
 
         if (!TokenStream.TryDequeue(out var keyToken))
             throw new Exception("Could not resolve the name of the arraytable, possibly because of a syntax error.");
@@ -177,6 +175,9 @@ sealed class TOMLParser
         {
             if (existingValue is not TArray existingArrayTable)
                 throw new Exception($"A value for the key '{key.Value}' already exists, but had the type {existingValue.Type}, instead of arraytable.");
+
+            if (existingValue.Type is TObject.TOMLType.Array)
+                throw new Exception($"Statically defined array '{key.Value}' cannot be appended to.");
 
             else
             {
