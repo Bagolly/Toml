@@ -9,6 +9,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="OldParser.cs" />
     <Compile Remove="TOMLOld.cs" />
   </ItemGroup>
 
@@ -16,4 +17,7 @@
     <PackageReference Include="BenchmarkDotNet" Version="0.13.12" />
   </ItemGroup>
 
+	<ItemGroup>
+		<InternalsVisibleTo Include="TomlJsonConvert" />
+	</ItemGroup>
 </Project>
