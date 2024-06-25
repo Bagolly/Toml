@@ -1,4 +1,6 @@
-﻿global using System;
+﻿#define TOML_VER_1_1_0
+
+global using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
