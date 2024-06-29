@@ -38,6 +38,8 @@ namespace Toml
             }
         }
 
+        internal void ResetPointer() => _appendedCharCount = 0;
+
         public readonly int Capacity => _chars.Length;
 
         public void EnsureCapacity(int capacity)

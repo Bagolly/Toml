@@ -9,6 +9,7 @@ using System.Runtime.CompilerServices;
 using System.Reflection.Metadata;
 using Microsoft.Diagnostics.Tracing.Parsers.FrameworkEventSource;
 using Microsoft.CodeAnalysis;
+using Toml.Reader;
 
 
 namespace TomlJsonConvert;
@@ -118,34 +119,35 @@ internal class Program
         //Uncaught exception: -2, Invalid file: -1, Success: 0
         parserErrMsg = null;
         Console.OutputEncoding = Encoding.UTF8;
+
         try
         {
             using FileStream fs = new(fPath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan);
-
-            TOMLTokenizer t = new(fs);
+            TomlStreamSource source = new(fs);
+            TOMLTokenizer t = new(source);
             var (tStream, values) = t.TokenizeFile();
 
 
-            if (t.ErrorLog.IsValueCreated)
+            if (t.ErrorLog.Count is not 0)
             {
                 if (printLog)
                 {
-                    Console.WriteLine($"Parsing could not start because the following syntax error{(t.ErrorLog.Value.Count > 1 ? "s" : "")}:");
+                    Console.WriteLine($"Parsing could not start because the following syntax error{(t.ErrorLog.Count > 1 ? "s" : "")}:");
 
                     Console.ForegroundColor = ConsoleColor.DarkYellow;
 
-                    Console.WriteLine($"─(*)┅> {t.ErrorLog.Value[0]}");
+                    Console.WriteLine($"─(*)┅> {t.ErrorLog[0]}");
                     int i = 1;
-                    for (; i < t.ErrorLog.Value.Count; ++i)
+                    for (; i < t.ErrorLog.Count; ++i)
                     {
                         Console.Write($"{new(' ', i * 2 + 1)}");
 
 
-                        Console.WriteLine($"┖(*)┅> {t.ErrorLog.Value[i]}");
+                        Console.WriteLine($"┖(*)┅> {t.ErrorLog[i]}");
                     }
 
                     if (i != 1)
-                        Console.WriteLine($"{new(' ', i * 2 + 1)}┖(*)─┅> {t.ErrorLog.Value[^1]}");
+                        Console.WriteLine($"{new(' ', i * 2 + 1)}┖(*)─┅> {t.ErrorLog[^1]}");
 
 
                     Console.ResetColor();

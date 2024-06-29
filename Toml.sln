@@ -5,7 +5,7 @@ VisualStudioVersion = 17.9.34607.119
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Toml", "Toml\Toml.csproj", "{C2C51FEA-8AC7-4383-9503-4C8096386396}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TomlJsonConvert", "TomlJsonConvert\TomlJsonConvert.csproj", "{935B1D34-AF7D-42BB-9865-9F233665E066}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "TomlJsonConvert", "TomlJsonConvert\TomlJsonConvert.csproj", "{935B1D34-AF7D-42BB-9865-9F233665E066}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

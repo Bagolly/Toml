@@ -6,8 +6,10 @@ using System.Runtime.Serialization;
 using System.Security.Cryptography.X509Certificates;
 using Toml.Tokenization;
 using static Toml.Tokenization.Constants;
-using static Toml.Runtime.TOMLExceptionHandler;
 using System.Globalization;
+using Microsoft.Diagnostics.Runtime.Utilities;
+using BenchmarkDotNet.Columns;
+using Microsoft.Diagnostics.Tracing.Parsers.AspNet;
 
 
 namespace Toml.Runtime;
@@ -20,7 +22,7 @@ public abstract class TObject
     {
         String, Integer, Float, Boolean,
         DateTimeOffset, DateTimeLocal, TimeOnly, DateOnly,
-        Array, InlineTable, 
+        Array, InlineTable,
         KeyValTable, HeaderTable, ArrayTable, Key
     }
 
@@ -37,12 +39,15 @@ public abstract class TValue<T> : TObject, ITomlSerializeable
 {
     public virtual T? Value { get; set; }
 
+    public TOMLTokenMetadata Metadata { get; init; }
+
     public override string ToString() => SerializeValue();
 
-    public override TObject this[string index] { get => throw new InvalidOperationException(MessageFor[RuntimeError.ValueTypeIndexed]); set => throw new InvalidOperationException(MessageFor[RuntimeError.ValueTypeIndexed]); }
+    public override TObject this[string index] { get => throw _exception; set => throw _exception; }
 
-    public override TObject this[int index] { get => throw new InvalidOperationException(MessageFor[RuntimeError.ValueTypeIndexed]); set => throw new InvalidOperationException(MessageFor[RuntimeError.ValueTypeIndexed]); }
+    public override TObject this[int index] { get => throw _exception; set => throw _exception; }
 
+    private static readonly InvalidOperationException _exception = new("Cannot apply indexing to a TOML value type.");
 
     #region Serialization 
     public abstract string SerializeValue(); //TODO: remove these from production code, especially type. Its only used for generating JSON for testing.
@@ -51,7 +56,7 @@ public abstract class TValue<T> : TObject, ITomlSerializeable
 }
 
 
-public sealed class TArray : TObject, IEnumerable<TObject>, ITCollection
+public sealed class TArray : TObject, IEnumerable<TObject>, ITomlCollection
 {
     public override TObject this[string index] { get => throw new InvalidOperationException("Arrays cannot be indexed as tables."); set => throw new InvalidOperationException("Arrays cannot be indexed as tables."); }
 
@@ -121,7 +126,7 @@ public sealed class TArray : TObject, IEnumerable<TObject>, ITCollection
     {
         if (Type is TOMLType.ArrayTable && value.Type is not TOMLType.HeaderTable)
             throw new InvalidOperationException($"Cannot add a value of type {value.Type}; arraytables can only hold tables.");
-        
+
         Values.Add(value);
     }
 
@@ -133,9 +138,9 @@ public sealed class TArray : TObject, IEnumerable<TObject>, ITCollection
 
 
 
-public sealed class TTable : TObject, IEnumerable<KeyValuePair<string, TObject>>, ITCollection
+public sealed class TTable : TObject, IEnumerable<KeyValuePair<string, TObject>>, ITomlCollection
 {
-    public override TObject this[int index] { get => throw new InvalidOperationException(MessageFor[RuntimeError.TableIndexedAsArray]); set => throw new InvalidOperationException(MessageFor[RuntimeError.TableIndexedAsArray]); }
+    public override TObject this[int index] { get => throw new InvalidOperationException("Cannot index a table as an array."); set => throw new InvalidOperationException("Cannot index a table as an array."); }
 
     public override TObject this[string index]
     {
@@ -154,13 +159,13 @@ public sealed class TTable : TObject, IEnumerable<KeyValuePair<string, TObject>>
 
     internal TomlTableState State { get; set; }
 
-        
+
     public bool IsInline => Type is TOMLType.InlineTable;
 
     private void AddAssert(in ReadOnlySpan<char> key, TObject value)
     {
         if (Type is TOMLType.InlineTable && State is TomlTableState.Closed)
-            throw new TomlRuntimeException(MessageFor[RuntimeError.InlineNoExtend]);
+            throw new TomlRuntimeException("Inline tables cannot be extended.");
 
 
         if (State is TomlTableState.Closed && value.Type is not (TOMLType.HeaderTable or TOMLType.ArrayTable))
@@ -172,7 +177,7 @@ public sealed class TTable : TObject, IEnumerable<KeyValuePair<string, TObject>>
 
 
     private void AddAssert(string key, TObject value) => AddAssert(key.AsSpan(), value);
-    
+
 
     public void Add(in ReadOnlySpan<char> key, TObject value) => AddAssert(in key, value);
 
@@ -192,9 +197,9 @@ public sealed class TTable : TObject, IEnumerable<KeyValuePair<string, TObject>>
 
     public static TTable FromDictionary(Dictionary<string, TObject> dictionary) => new(TOMLType.HeaderTable) { Values = dictionary };
 
-    void ITCollection.Add(string key, TObject val) => Values.Add(key, val);
+    void ITomlCollection.Add(string key, TObject val) => Values.Add(key, val);
 
-    void ITCollection.Add(TObject val) => throw new TomlRuntimeException("Can't add to table like an array!");
+    void ITomlCollection.Add(TObject val) => throw new TomlRuntimeException("Can't add to table like an array!");
 
 
     public TTable(TOMLType type)
@@ -230,32 +235,35 @@ public sealed class TTable : TObject, IEnumerable<KeyValuePair<string, TObject>>
 
 public sealed class TInteger : TValue<long>, IEquatable<long>
 {
-    public TInteger(long value)
+    public TInteger(long value, TOMLTokenMetadata radix)
     {
         Type = TOMLType.Integer;
         Value = value;
+        Metadata = radix;
     }
 
-    public TInteger(in ReadOnlySpan<char> str, TOMLTokenMetadata? radix)
+    public TInteger(in ReadOnlySpan<char> str, TOMLTokenMetadata radix)
     {
         Type = TOMLType.Integer;
-
+    
         _radix = radix switch
         {
             TOMLTokenMetadata.Hex => 16,
             TOMLTokenMetadata.Binary => 2,
             TOMLTokenMetadata.Octal => 8,
-            _ => 10,
+            TOMLTokenMetadata.Decimal => 10,
+            _ => throw new TomlInternalException("Invalid radix passed to TInteger constructor"),
         };
 
 
+        Metadata = radix;
         Value = ToInteger(in str, _radix);
     }
 
 
-    public TInteger(in ReadOnlySpan<char> str, TOMLTokenMetadata? radix, bool isNegative = true) : this(isNegative ? str[1..] : str, radix)
-    { 
-        if(isNegative)
+    public TInteger(in ReadOnlySpan<char> str, TOMLTokenMetadata radix, bool isNegative = true) : this(isNegative ? str[1..] : str, radix)
+    {
+        if (isNegative)
             Value = -Value;
     }
 
@@ -278,7 +286,7 @@ checked{
 
     private byte _radix;
 
-    public static implicit operator TInteger(long val) => new(val);
+    public static implicit operator TInteger(long val) => new(val, TOMLTokenMetadata.Decimal);
     public static implicit operator long(TInteger val) => val.Value;
     public static implicit operator long?(TInteger? val) => val?.Value;
 
@@ -299,16 +307,18 @@ checked{
 
 public sealed class TString : TValue<string>, IEquatable<string?>
 {
-    public TString(in ReadOnlySpan<char> str)
+    public TString(in ReadOnlySpan<char> str, TOMLTokenMetadata metadata)
     {
         Type = TOMLType.String;
         Value = str.ToString(); //Uses a special (and speedier) string constructor internally when type variable is char
+        Metadata = metadata;
     }
 
-    public TString(in string str)
+    public TString(in string str, TOMLTokenMetadata metadata)
     {
         Type = TOMLType.String;
         Value = str;
+        Metadata = metadata;
     }
 
 
@@ -317,8 +327,8 @@ public sealed class TString : TValue<string>, IEquatable<string?>
 #pragma warning restore CS8765
 
 
-    public static implicit operator TString(string str) => new(str);
-    public static implicit operator TString(ReadOnlySpan<char> str) => new(in str);
+    public static implicit operator TString(string str) => new(str, TOMLTokenMetadata.Basic);
+    public static implicit operator TString(ReadOnlySpan<char> str) => new(in str, TOMLTokenMetadata.Basic);
     public static implicit operator string?(TString? str) => str?.Value;
 
     public static bool operator ==(TString lhs, TString rhs) => lhs.Value == rhs.Value && lhs?.Type == rhs.Type;
@@ -337,11 +347,24 @@ public sealed class TString : TValue<string>, IEquatable<string?>
 
 internal sealed class TFragment : TValue<string>, IEquatable<string>
 {
-    public TFragment(string str)
+    public TFragment(string str, bool isDotted, TOMLTokenMetadata metadata = TOMLTokenMetadata.None)
     {
         Value = str;
         Type = TOMLType.Key;
+        Metadata = metadata;
+        IsDotted = isDotted;
     }
+
+
+    public TFragment(in ReadOnlySpan<char> str, bool isDotted, TOMLTokenMetadata metadata = TOMLTokenMetadata.None)
+    {
+        Value = new(str);
+        Type = TOMLType.Key;
+        Metadata = metadata;
+        IsDotted = isDotted;
+    }
+
+    public bool IsDotted { get; internal set; }
 
     /* Justification 
      * Safe to suppress nullability check on the getter, the derived type (TKey) enforces the initialization
@@ -396,14 +419,15 @@ public sealed class TBool : TValue<bool>, IEquatable<bool>
 
 public sealed class TFloat : TValue<double>, IEquatable<double>
 {
-    public TFloat(double value)
+    public TFloat(double value, TOMLTokenMetadata metadata = TOMLTokenMetadata.None)
     {
         Type = TOMLType.Float;
         Value = value;
     }
 
-    public TFloat(in ReadOnlySpan<char> str)
-    {   
+
+    public TFloat(in ReadOnlySpan<char> str, TOMLTokenMetadata metadata = TOMLTokenMetadata.None)
+    {
         if (!double.TryParse(str, CultureInfo.InvariantCulture, out var result))
             throw new TomlRuntimeException($"Invalid float value '{str.ToString()}'");
 
@@ -438,10 +462,11 @@ public sealed class TFloat : TValue<double>, IEquatable<double>
 
 public sealed class TDateTimeOffset : TValue<DateTimeOffset>, IEquatable<DateTimeOffset>
 {
-    public TDateTimeOffset(DateTimeOffset value)
+    public TDateTimeOffset(DateTimeOffset value, TOMLTokenMetadata metadata = TOMLTokenMetadata.None)
     {
         Value = value;
         Type = TOMLType.DateTimeOffset;
+        Metadata = metadata;
     }
 
     public override bool Equals(object? obj) => obj is TDateTimeOffset other && this == other;
@@ -548,51 +573,73 @@ public sealed class TDateOnly : TValue<DateOnly>, IEquatable<DateOnly>
 }
 
 
-//For now, this excpetion is only used to filter exceptions thrown by the parser's code, and not .NET.
-//.NET exceptions in turn indicate an internal bug or a missed edge-case that needs attention.
-public class TomlRuntimeException(string msg) : Exception(msg) { }
-
-
-public class TomlReaderException(string message) : Exception(message) { }
-
-
-public class TomlInternalException(string message) : Exception($"[INTERNAL]: {message}") { }
-
-
-class TOMLExceptionHandler
+/// <summary>
+/// Represents exceptions that occur during parsing or construction of TOML data types.
+/// </summary>
+public class TomlRuntimeException : ApplicationException
 {
-    //TODO: refactor when errors are somewhat finalized, and different error levels added.
-    public static readonly Dictionary<RuntimeError, string> MessageFor = new()
-    {
-        [RuntimeError.CommentInvalidControlChar] = "Tab (U+0020) is the only allowed control character in comments.",
-        [RuntimeError.CommentCRInvalid] = "Invalid CRLF line ending or stray carriage return in comment.",
-        [RuntimeError.BareKeyInvalid] = "Invalid character in key.",
-        [RuntimeError.KeyInvalid] = "An invalid character was found in a key token.",
-        [RuntimeError.KeyUndefined] = "A key was declared, but no value was defined.",
-        [RuntimeError.KeyInvalidSyntax] = "An invalid character was found after key declaration.",
-        [RuntimeError.InvalidTopLevelChar] = "Only key/value pairs, comments or table declarations can be at the root of a document.",
-        [RuntimeError.ArrayIndexedAsTable] = "Attempted to index an array as a table.",
-        [RuntimeError.TableIndexedAsArray] = "Attempted to index a table as an array",
-        [RuntimeError.ValueTypeIndexed] = "This type is not indexable.",
-        [RuntimeError.InlineNoExtend] = "Inline tables cannot be extended.",
-    };
+    public TomlRuntimeException(string msg) : base(msg) => Value = null;
 
-    public enum RuntimeError
-    {
-        CommentInvalidControlChar,
-        CommentCRInvalid,
-        BareKeyInvalid,
-        KeyInvalid,
-        KeyUndefined,
-        KeyInvalidSyntax,
-        InvalidTopLevelChar,
-        ArrayIndexedAsTable,
-        TableIndexedAsArray,
-        ValueTypeIndexed,
-        InlineNoExtend,
-    }
+    public TomlRuntimeException() : base() => Value = null;
+
+
+
+    /// <param name="cause">The object that caused the exception.</param>
+    public TomlRuntimeException(string msg, TObject? cause) : base(msg) => Value = cause;
+
+
+    /// <summary>
+    /// The violating object that caused the exception.
+    /// </summary>
+    public TObject? Value { get; init; }
 }
 
+
+/// <summary>
+/// Represents exceptions that occur in the reader feeding input to the tokenizer.
+/// </summary>
+public class TomlReaderException : ApplicationException
+{
+    public TomlReaderException() : base()
+    {
+        Line = -1;
+        Column = -1;
+    }
+
+    public TomlReaderException(string msg, int line, int column) : base(msg)
+    {
+        Line = line;
+        Column = column;
+    }
+
+    /// <summary>
+    /// The line where the error was encountered.
+    /// </summary>
+    public int Line { get; init; }
+
+    /// <summary>
+    /// The column where the error was encountered.
+    /// </summary>
+    /// <remarks>
+    /// <b>Note:</b> 
+    /// sometimes this value can be off by a few characters.
+    /// Positional information is meant to be used in tandem with the error message itself to effectively diagnose errors.
+    /// </remarks>
+    public int Column { get; init; }
+
+    public override string Message => $"{base.Message} Occured at line {Line}, column {Column}";
+}
+
+
+/// <summary>
+/// Represents unexpected exceptions that indicate an internal error in the library.
+/// </summary>
+public class TomlInternalException : ApplicationException //AKA the good old "you fucked up" exception.
+{
+    public TomlInternalException(string msg) : base($"[INTERNAL]: {msg}") { }
+
+    public TomlInternalException() : base() { }
+}
 
 
 enum TomlTableState
@@ -616,7 +663,7 @@ enum TomlTableState
 //The other choice would be to make an 'AsArray()' and 'AsTable()' method, which would essentially reinterpret the TObject
 //pointer to the required collection type or throw on failure.
 //This would add a lot of what is basically boilerplate code to queries, so for now it's like this.
-interface ITCollection
+interface ITomlCollection
 {
     public void Add(string key, TObject val);
     public void Add(TObject val);
