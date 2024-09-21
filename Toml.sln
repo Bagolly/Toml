@@ -7,6 +7,10 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Toml", "Toml\Toml.csproj", 
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "TomlJsonConvert", "TomlJsonConvert\TomlJsonConvert.csproj", "{935B1D34-AF7D-42BB-9865-9F233665E066}"
 EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "TomlBenchmarking", "TomlBenchmarking\TomlBenchmarking.csproj", "{B42C13FD-355A-4416-9FF0-E7F9F37D928F}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TomlTesting", "TomlTesting\TomlTesting.csproj", "{9589EDB9-612F-4DAF-8D10-6D224C18DE6F}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -21,6 +25,14 @@ Global
 		{935B1D34-AF7D-42BB-9865-9F233665E066}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{935B1D34-AF7D-42BB-9865-9F233665E066}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{935B1D34-AF7D-42BB-9865-9F233665E066}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B42C13FD-355A-4416-9FF0-E7F9F37D928F}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B42C13FD-355A-4416-9FF0-E7F9F37D928F}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B42C13FD-355A-4416-9FF0-E7F9F37D928F}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B42C13FD-355A-4416-9FF0-E7F9F37D928F}.Release|Any CPU.Build.0 = Release|Any CPU
+		{9589EDB9-612F-4DAF-8D10-6D224C18DE6F}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{9589EDB9-612F-4DAF-8D10-6D224C18DE6F}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{9589EDB9-612F-4DAF-8D10-6D224C18DE6F}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{9589EDB9-612F-4DAF-8D10-6D224C18DE6F}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

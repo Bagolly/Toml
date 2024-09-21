@@ -1,19 +1,15 @@
 ﻿using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Net.Http.Headers;
-using System.Runtime.Serialization;
-using System.Security.Cryptography.X509Certificates;
 using Toml.Tokenization;
 using static Toml.Tokenization.Constants;
 using System.Globalization;
-using Microsoft.Diagnostics.Runtime.Utilities;
-using BenchmarkDotNet.Columns;
-using Microsoft.Diagnostics.Tracing.Parsers.AspNet;
+using System.Runtime.CompilerServices;
+using System.Diagnostics.CodeAnalysis;
+using Toml.Writer;
 
 
 namespace Toml.Runtime;
-#pragma warning disable 0809
 
 
 public abstract class TObject
@@ -23,42 +19,58 @@ public abstract class TObject
         String, Integer, Float, Boolean,
         DateTimeOffset, DateTimeLocal, TimeOnly, DateOnly,
         Array, InlineTable,
-        KeyValTable, HeaderTable, ArrayTable, Key
+        KeyValTable, HeaderTable, ArrayTable, Key, Comment
     }
 
+    //Why is there a Type field when the classes themselves are already 'unique'?
+    //Eg. "isn't it redundant to store "Type = TOMLType.String" for all TString instances?"
+    //No, not really. This way a simple field access on any TObject can tell what type
+    //it can safely be cast down to without using the "is", "as" or explicit cast operators.
+    //The contract for the Type field to always match its instance is internal, and yes,
+    //reflection could completely ruin that at any time.
+    //But that's like saying it is pointless to reinforce a bridge against the elements
+    //because a well-placed bomb could destroy it anyway, so not too worried about that.
     public virtual TOMLType Type { get; protected init; }
 
     public abstract TObject this[string index] { get; set; }
 
     public abstract TObject this[int index] { get; set; }
+
+
+    //These properties cannot be made read- or init-only, so it's not safe to expose them as public.
+    internal int CommentSameLine { get; set; } = -1;
+
+    internal int CommentBelow { get; set; } = -1;
 }
 
 
 
-public abstract class TValue<T> : TObject, ITomlSerializeable
+public abstract class TValue<T> : TObject where T : notnull
 {
-    public virtual T? Value { get; set; }
+    public T Value { get; set; }
 
-    public TOMLTokenMetadata Metadata { get; init; }
+    public TomlTokenMetadata Metadata { get; init; }
 
-    public override string ToString() => SerializeValue();
+    public TValue(in T value) => Value = value;
+
+    public override string? ToString() => Value.ToString();
 
     public override TObject this[string index] { get => throw _exception; set => throw _exception; }
 
     public override TObject this[int index] { get => throw _exception; set => throw _exception; }
 
     private static readonly InvalidOperationException _exception = new("Cannot apply indexing to a TOML value type.");
-
-    #region Serialization 
-    public abstract string SerializeValue(); //TODO: remove these from production code, especially type. Its only used for generating JSON for testing.
-    public abstract string SerializeType(); //same with this, dependency chain should be reversed, maybe try a visitor or similar. LATER.
-    #endregion
 }
 
 
 public sealed class TArray : TObject, IEnumerable<TObject>, ITomlCollection
 {
-    public override TObject this[string index] { get => throw new InvalidOperationException("Arrays cannot be indexed as tables."); set => throw new InvalidOperationException("Arrays cannot be indexed as tables."); }
+    public override TObject this[string index] 
+    { 
+        get => throw new InvalidOperationException("Arrays cannot be indexed as tables."); 
+        set => throw new InvalidOperationException("Arrays cannot be indexed as tables."); 
+    }
+
 
     public override TObject this[int index]
     {
@@ -86,9 +98,7 @@ public sealed class TArray : TObject, IEnumerable<TObject>, ITomlCollection
         }
     }
 
-
     public List<TObject> this[Range r] => Values[r];
-
 
     public List<TObject> Values { get; init; }
 
@@ -142,10 +152,10 @@ public sealed class TTable : TObject, IEnumerable<KeyValuePair<string, TObject>>
 {
     public override TObject this[int index] { get => throw new InvalidOperationException("Cannot index a table as an array."); set => throw new InvalidOperationException("Cannot index a table as an array."); }
 
-    public override TObject this[string index]
+    public override TObject this[string key]
     {
-        get => Values[index];
-        set => AddAssert(index, value);
+        get => Values[key];
+        set => AddAssert(key, value);
     }
 
     public TObject this[in ReadOnlySpan<char> index]
@@ -233,42 +243,30 @@ public sealed class TTable : TObject, IEnumerable<KeyValuePair<string, TObject>>
 }
 
 
+
 public sealed class TInteger : TValue<long>, IEquatable<long>
 {
-    public TInteger(long value, TOMLTokenMetadata radix)
+    public TInteger(long value, TomlTokenMetadata radix) : base(value)
     {
         Type = TOMLType.Integer;
-        Value = value;
         Metadata = radix;
     }
 
-    public TInteger(in ReadOnlySpan<char> str, TOMLTokenMetadata radix)
+    public TInteger(in ReadOnlySpan<char> str, TomlTokenMetadata radix) : base(ToInteger(str, (byte)radix))
     {
         Type = TOMLType.Integer;
-    
-        _radix = radix switch
-        {
-            TOMLTokenMetadata.Hex => 16,
-            TOMLTokenMetadata.Binary => 2,
-            TOMLTokenMetadata.Octal => 8,
-            TOMLTokenMetadata.Decimal => 10,
-            _ => throw new TomlInternalException("Invalid radix passed to TInteger constructor"),
-        };
-
-
         Metadata = radix;
-        Value = ToInteger(in str, _radix);
     }
 
 
-    public TInteger(in ReadOnlySpan<char> str, TOMLTokenMetadata radix, bool isNegative = true) : this(isNegative ? str[1..] : str, radix)
+    public TInteger(in ReadOnlySpan<char> str, TomlTokenMetadata radix, bool isNegative = true) : this(isNegative ? str[1..] : str, radix)
     {
         if (isNegative)
             Value = -Value;
     }
 
 
-    internal static long ToInteger(ref readonly ReadOnlySpan<char> str, byte radix)
+    internal static long ToInteger(ReadOnlySpan<char> str, byte radix)
     {
         long val = 0;
         int i = 0;
@@ -284,9 +282,7 @@ checked{
         return val;
     }
 
-    private byte _radix;
-
-    public static implicit operator TInteger(long val) => new(val, TOMLTokenMetadata.Decimal);
+    public static implicit operator TInteger(long val) => new(val, TomlTokenMetadata.Decimal);
     public static implicit operator long(TInteger val) => val.Value;
     public static implicit operator long?(TInteger? val) => val?.Value;
 
@@ -296,109 +292,94 @@ checked{
     public override bool Equals(object? obj) => obj is TInteger integer && this == integer;
     public override int GetHashCode() => HashCode.Combine(Type, Value);
     public bool Equals(long l) => Value == l;
-
-
-
-    public override string SerializeValue() => Value.ToString();
-
-    public override string SerializeType() => "integer";
 }
 
 
-public sealed class TString : TValue<string>, IEquatable<string?>
+public abstract class TStringBase : TValue<string>, IEquatable<string?>
 {
-    public TString(in ReadOnlySpan<char> str, TOMLTokenMetadata metadata)
-    {
-        Type = TOMLType.String;
-        Value = str.ToString(); //Uses a special (and speedier) string constructor internally when type variable is char
-        Metadata = metadata;
-    }
+    public TStringBase(ReadOnlySpan<char> str) : base(new(str)) { }
 
-    public TString(in string str, TOMLTokenMetadata metadata)
-    {
-        Type = TOMLType.String;
-        Value = str;
-        Metadata = metadata;
-    }
+    public TStringBase(string str) : base(str) { }
 
+    public static bool operator ==(TStringBase lhs, TStringBase rhs) => lhs.Value == rhs.Value && lhs?.Type == rhs.Type;
 
-#pragma warning disable CS8765
-    public override string Value { get => base.Value!; set => base.Value = value; }
-#pragma warning restore CS8765
+    public static bool operator !=(TStringBase lhs, TStringBase rhs) => !(lhs == rhs);
 
+    public override bool Equals(object? obj) => obj is TStringBase other && this == other;
 
-    public static implicit operator TString(string str) => new(str, TOMLTokenMetadata.Basic);
-    public static implicit operator TString(ReadOnlySpan<char> str) => new(in str, TOMLTokenMetadata.Basic);
-    public static implicit operator string?(TString? str) => str?.Value;
-
-    public static bool operator ==(TString lhs, TString rhs) => lhs.Value == rhs.Value && lhs?.Type == rhs.Type;
-    public static bool operator !=(TString lhs, TString rhs) => !(lhs == rhs);
-
-    public override bool Equals(object? obj) => obj is TString other && this == other;
     public override int GetHashCode() => HashCode.Combine(Value, Type);
+
     public bool Equals(string? other) => other == Value;
-
-
-    public override string SerializeValue() => Value;
-
-    public override string SerializeType() => "string";
 }
 
 
-internal sealed class TFragment : TValue<string>, IEquatable<string>
+
+public sealed class TString : TStringBase
 {
-    public TFragment(string str, bool isDotted, TOMLTokenMetadata metadata = TOMLTokenMetadata.None)
+    public TString(in ReadOnlySpan<char> str, TomlTokenMetadata metadata) : base(str)
     {
-        Value = str;
+        Debug.Assert(metadata is >= TomlTokenMetadata.Basic and <= TomlTokenMetadata.MultilineLiteral);
+        Type = TOMLType.String;
+        Metadata = metadata;
+    }
+
+    public TString(in string str, TomlTokenMetadata metadata) : base(str)
+    {
+        Debug.Assert(metadata is >= TomlTokenMetadata.Basic and <= TomlTokenMetadata.MultilineLiteral);
+        Type = TOMLType.String;
+        Metadata = metadata;
+    }
+}
+
+
+
+public sealed class TComment : TStringBase
+{
+    public TComment(in ReadOnlySpan<char> str, int commentIndex, bool isTopLevel = false) : base(str)
+    {
+        Type = TOMLType.Comment;
+        CommentSameLine = commentIndex;
+        IsTopLevel = isTopLevel;
+    }
+
+    public TComment(in string str, int commentIndex, bool isTopLevel = false) : base(str)
+    {
+        Type = TOMLType.Comment;
+        CommentSameLine = commentIndex;
+        IsTopLevel = isTopLevel;
+    }
+
+    public bool IsTopLevel { get; init; }
+}
+
+
+
+public sealed class TKey : TStringBase
+{
+    public TKey(string str, bool isDotted, TomlTokenMetadata metadata = TomlTokenMetadata.None) : base(str)
+    {
         Type = TOMLType.Key;
         Metadata = metadata;
         IsDotted = isDotted;
     }
 
 
-    public TFragment(in ReadOnlySpan<char> str, bool isDotted, TOMLTokenMetadata metadata = TOMLTokenMetadata.None)
+    public TKey(in ReadOnlySpan<char> str, bool isDotted, TomlTokenMetadata metadata = TomlTokenMetadata.None) : base(str)
     {
-        Value = new(str);
         Type = TOMLType.Key;
         Metadata = metadata;
         IsDotted = isDotted;
     }
 
-    public bool IsDotted { get; internal set; }
-
-    /* Justification 
-     * Safe to suppress nullability check on the getter, the derived type (TKey) enforces the initialization
-     * of Value in the constructor. The setter is init-only, only the constructor will assign to Value.
-     * Since the constructor takes a non-nullable argument, and the string constructor used to assign to Value
-     * cannot return String?, Value is always definitely assigned, despite the base definition TValue<T>.Value being nullable (T?).
-     * However, the compiler (rightfully) cannot verify code relying on 'proper usage' to remain correct, hence the warning.
-     * (with 'proper usage' referring to the fact that the constructor definitely assigns Value).
-     * The main reason for this is to avoid having to null-forgive every 'unchecked' access to Value when using TKey in the parser.
-     */
-#pragma warning disable CS8765
-    public override string Value { get => base.Value!; set => base.Value = value; }
-#pragma warning restore CS8765
-
-    public override bool Equals(object? obj) => obj is TFragment other && this == other;
-    public override int GetHashCode() => HashCode.Combine(Value, Type); //This may cause uniqueness issues if Value is null?
-    public bool Equals(string? other) => other == Value;
-
-    [Obsolete("This method always throws; only values can be serialized directly.")]
-    public override string SerializeValue() => Value;
-
-    [Obsolete("This method always throws; only values can be serialized directly.")]
-    public override string SerializeType() => throw new InvalidOperationException("Internal type TFragment cannot be serialized directly.");
+    public bool IsDotted { get; internal set; }  //This property is set after the key is constructed.
 }
 
 
 
 public sealed class TBool : TValue<bool>, IEquatable<bool>
 {
-    public TBool(bool value)
-    {
-        Type = TOMLType.Boolean;
-        Value = value;
-    }
+    public TBool(bool value) : base(value) => Type = TOMLType.Boolean;
+
 
     public override bool Equals(object? obj) => obj is TBool other && this == other;
     public override int GetHashCode() => HashCode.Combine(Type, Value);
@@ -409,36 +390,28 @@ public sealed class TBool : TValue<bool>, IEquatable<bool>
 
     public static bool operator true(TBool b) => b.Value;
     public static bool operator false(TBool b) => b.Value;
-
-
-    public override string SerializeValue() => Value ? "true" : "false";
-
-    public override string SerializeType() => "bool";
 }
+
 
 
 public sealed class TFloat : TValue<double>, IEquatable<double>
 {
-    public TFloat(double value, TOMLTokenMetadata metadata = TOMLTokenMetadata.None)
+    public TFloat(double value, TomlTokenMetadata metadata = TomlTokenMetadata.None) : base(value)
     {
         Type = TOMLType.Float;
-        Value = value;
+        Metadata = metadata;
     }
 
 
-    public TFloat(in ReadOnlySpan<char> str, TOMLTokenMetadata metadata = TOMLTokenMetadata.None)
+    public TFloat(in ReadOnlySpan<char> str, TomlTokenMetadata metadata = TomlTokenMetadata.None)
+        : this(ToDouble(str), metadata) { }
+
+    private static double ToDouble(ReadOnlySpan<char> str)
     {
         if (!double.TryParse(str, CultureInfo.InvariantCulture, out var result))
             throw new TomlRuntimeException($"Invalid float value '{str.ToString()}'");
 
-#if CHECKED
-        if(result is double.PositiveInfinity or double.NegativeInfinity)
-        {
-            throw new OverflowException("Value was outside the range of System.Double.");
-        }
-#endif
-        Type = TOMLType.Float;
-        Value = result;
+        return result;
     }
 
     public override bool Equals(object? obj) => obj is TFloat other && this == other;
@@ -453,18 +426,14 @@ public sealed class TFloat : TValue<double>, IEquatable<double>
 
     public static bool operator ==(TFloat a, TFloat b) => a.Type == b.Type && a.Value == b.Value;
     public static bool operator !=(TFloat a, TFloat b) => !(a == b);
-
-    public override string SerializeValue() => Value.ToString();
-
-    public override string SerializeType() => "float";
 }
+
 
 
 public sealed class TDateTimeOffset : TValue<DateTimeOffset>, IEquatable<DateTimeOffset>
 {
-    public TDateTimeOffset(DateTimeOffset value, TOMLTokenMetadata metadata = TOMLTokenMetadata.None)
+    public TDateTimeOffset(in DateTimeOffset value, TomlTokenMetadata metadata = TomlTokenMetadata.None) : base(in value)
     {
-        Value = value;
         Type = TOMLType.DateTimeOffset;
         Metadata = metadata;
     }
@@ -475,13 +444,13 @@ public sealed class TDateTimeOffset : TValue<DateTimeOffset>, IEquatable<DateTim
 
     public bool Equals(DateTimeOffset other) => Value == other;
 
-    public bool HasUnkownOffset { get; init; }
+    public bool IsUnkownTimeOffset { get; init; }
 
-    public static bool operator ==(TDateTimeOffset lhs, TDateTimeOffset rhs) => lhs.Type == rhs.Type && lhs.Value == rhs.Value && lhs.HasUnkownOffset == rhs.HasUnkownOffset;
+    public static bool operator ==(TDateTimeOffset lhs, TDateTimeOffset rhs) => lhs.Type == rhs.Type && lhs.Value == rhs.Value && lhs.IsUnkownTimeOffset == rhs.IsUnkownTimeOffset;
     public static bool operator !=(TDateTimeOffset lhs, TDateTimeOffset rhs) => !(lhs == rhs);
 
 
-    public override string SerializeValue()
+    public string ToRfc3339String()
     {
         string datetime = Value.ToString("yyyy-MM-dd'T'HH:mm:ss", CultureInfo.InvariantCulture);
 
@@ -497,17 +466,16 @@ public sealed class TDateTimeOffset : TValue<DateTimeOffset>, IEquatable<DateTim
 
         return datetime;
     }
-
-    public override string SerializeType() => "datetime";
 }
+
 
 
 public sealed class TDateTime : TValue<DateTime>, IEquatable<DateTime>
 {
-    public TDateTime(DateTime value)
+    public TDateTime(in DateTime value, TomlTokenMetadata metadata = TomlTokenMetadata.None) : base(in value)
     {
-        Value = value;
         Type = TOMLType.DateTimeLocal;
+        Metadata = metadata;
     }
 
     public override bool Equals(object? obj) => obj is TDateTime other && this == other;
@@ -519,21 +487,15 @@ public sealed class TDateTime : TValue<DateTime>, IEquatable<DateTime>
     public static bool operator ==(TDateTime lhs, TDateTime rhs) => lhs.Type == rhs.Type && lhs.Value == rhs.Value;
     public static bool operator !=(TDateTime lhs, TDateTime rhs) => !(lhs == rhs);
 
-
-    public override string SerializeValue() => Value.ToString("yyyy-MM-dd'T'HH:mm:ss.fff");
-
-    public override string SerializeType() => "datetime-local";
+    public string ToRfc3339String() => Value.ToString("yyyy-MM-dd'T'HH:mm:ss.fff");
 }
+
 
 
 public sealed class TTimeOnly : TValue<TimeOnly>, IEquatable<TimeOnly>
 {
-    public TTimeOnly(TimeOnly value)
-    {
-        Value = value;
-        Type = TOMLType.TimeOnly;
-    }
-
+    public TTimeOnly(in TimeOnly value) : base(in value) => Type = TOMLType.TimeOnly;
+    
 
     public bool Equals(TimeOnly other) => Value == other;
 
@@ -544,20 +506,14 @@ public sealed class TTimeOnly : TValue<TimeOnly>, IEquatable<TimeOnly>
     public static bool operator ==(TTimeOnly lhs, TTimeOnly rhs) => lhs.Type == rhs.Type && lhs.Value == rhs.Value;
     public static bool operator !=(TTimeOnly lhs, TTimeOnly rhs) => !(lhs == rhs);
 
-
-    public override string SerializeValue() => Value.ToString("HH:mm:ss.fff");
-
-    public override string SerializeType() => "time-local";
+    public string ToRfc3339String() => Value.ToString("HH:mm:ss.fff");
 }
+
 
 
 public sealed class TDateOnly : TValue<DateOnly>, IEquatable<DateOnly>
 {
-    public TDateOnly(DateOnly value)
-    {
-        Value = value;
-        Type = TOMLType.DateOnly;
-    }
+    public TDateOnly(in DateOnly value) : base(in value) => Type = TOMLType.DateOnly;
 
     public bool Equals(DateOnly other) => Value == other;
 
@@ -565,12 +521,9 @@ public sealed class TDateOnly : TValue<DateOnly>, IEquatable<DateOnly>
 
     public override int GetHashCode() => HashCode.Combine(Type, Value);
 
-
-    public override string SerializeValue() => Value.ToString("yyyy-MM-dd");
-
-
-    public override string SerializeType() => "date-local";
+    public string ToRfc3339String() => Value.ToString("yyyy-MM-dd");
 }
+
 
 
 /// <summary>
@@ -593,6 +546,7 @@ public class TomlRuntimeException : ApplicationException
     /// </summary>
     public TObject? Value { get; init; }
 }
+
 
 
 /// <summary>
@@ -631,8 +585,9 @@ public class TomlReaderException : ApplicationException
 }
 
 
+
 /// <summary>
-/// Represents unexpected exceptions that indicate an internal error in the library.
+/// Represents unexpected exceptions that indicate an internal error.
 /// </summary>
 public class TomlInternalException : ApplicationException //AKA the good old "you fucked up" exception.
 {
@@ -640,6 +595,7 @@ public class TomlInternalException : ApplicationException //AKA the good old "yo
 
     public TomlInternalException() : base() { }
 }
+
 
 
 enum TomlTableState
@@ -650,7 +606,6 @@ enum TomlTableState
     /// </summary>
     Open,
 
-
     /// <summary>
     /// <para><b>Tables</b>: only new subtables, that don't already exist, can be added. The table's subtables cannot be extended.</para>
     /// <para><b>Inline tables</b>: cannot be extended in any way.</para>
@@ -659,22 +614,24 @@ enum TomlTableState
 }
 
 
-//Technically this violates interface segregation, but makes actual usage more convenient by enabling arbitrarily nested indexing.
-//The other choice would be to make an 'AsArray()' and 'AsTable()' method, which would essentially reinterpret the TObject
-//pointer to the required collection type or throw on failure.
-//This would add a lot of what is basically boilerplate code to queries, so for now it's like this.
+// The problem this solves is grouping both array and table collections into a supertype so that compile-time type
+//resolution cannot complain about arbtirary and/or mixed indexing on TObject.
+// This violates interface segregation (and type safety) by requiring arrays to support key-based indexing, and
+//index-based access for arrays, but makes usage more convenient by enabling arbitrarily nested indexing.
+// The other choice would be to make an 'AsArray()' and 'AsTable()' method, which would downcast the TObject pointer
+//to the required collection type or throw on failure.
+// This would add a lot of what is basically boilerplate code to queries. The idea is that when a user loads a 
+//configuration file he should already know its layout.
+// If you don't have document layout information, you can't write a class to represent the document's runtime model
+//so I currently find it safe to assume that unkown config files aren't just loaded into programs
+//or at least not the main use case.
+//Tables and arrays can already safely be walked with a foreach, and the Type field makes type information
+//available even when upcast to TObject. For instances generated by the tokenizer, it guarantees that the
+//type field holds the correct type, meaning downcasting based on the type field will not fail.
 interface ITomlCollection
 {
     public void Add(string key, TObject val);
     public void Add(TObject val);
     public abstract TObject this[string index] { get; set; }
     public abstract TObject this[int index] { get; set; }
-}
-
-
-interface ITomlSerializeable
-{
-    public string SerializeValue();
-
-    public string SerializeType();
 }

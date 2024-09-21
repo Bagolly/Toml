@@ -4,16 +4,16 @@
 
 internal static class Constants
 {
-    #region Unicode Magic Numbers
+    #region Unicode "Magic Numbers"
     internal const int HighSurrogateStart = 0xD800;
     internal const int HighSurrogateRange = 0x3FF;
-    internal const int LowSurrogateStart = 0xDC00;
-    internal const int LowSurrogateEnd = 0xDFFF;
-    internal const int Plane1Start = 0x10_000;
-    internal const int ValidCodepointEnd = 0x110_000;
+    internal const int LowSurrogateStart  = 0xDC00;
+    internal const int LowSurrogateEnd    = 0xDFFF;
+    internal const int Plane1Start        = 0x10_000;
+    internal const int ValidCodepointEnd  = 0x110_000;
     #endregion
 
-    #region ASCII Magic Numbers
+    #region ASCII "Magic Numbers"
     /// <summary>
     /// The exlusive upper bound of ASCII digits.
     /// </summary>
@@ -46,7 +46,7 @@ internal static class Constants
     internal const char CR = '\r';
     internal const char LF = '\n';
     internal const char Backslash = '\\';
-    internal const char Comment = '#';
+    internal const char CommentStart = '#';
     internal const char DoubleQuote = '"';
     internal const char SingleQuote = '\'';
     internal const char Underscore = '_';
@@ -63,7 +63,7 @@ internal static class Constants
     #endregion
 
 
-    #region TOMLStreamReader Constants
+    #region TOMLStreamReader: Constants
     internal const int TAB = '\t';
     internal const int SPACE = ' ';
     #endregion
@@ -89,6 +89,8 @@ internal static class Constants
     internal const int Time_SecSeparator = 8;
     internal const int TimeOffset_Length = 6;
     #endregion
+
+    internal const int FracSec_MaxPrecisionDigits = 7;
 }
 
 
@@ -140,7 +142,7 @@ public enum TomlTokenType
     /// </summary>
     ArrayTableStart,
 
-    TOKEN_SENTINEL, //Only add new 'primitives' (tokens with no grammatical significance, only representing values) AFTER this value.
+    STRUCTURAL_BARRIER, //Only add new 'primitives' (tokens with no grammatical significance, only representing values) AFTER this value.
 
     String,
     Integer,
@@ -151,48 +153,48 @@ public enum TomlTokenType
 }
 
 
-public enum TOMLTokenMetadata
+public enum TomlTokenMetadata
 {   
     None,
 
-    //Key (TFragment)
+    //Key
     Bare,
-    QuotedKey,
+    QuotedKey = 3,
     QuotedLiteralKey,
-    
-    //String (TString)
+
+    //String
+    Comment,
     Basic,
     Multiline,
-    Literal,
-    MultilineLiteral,
+    Literal = 9,
+    MultilineLiteral = 11,
     
-    //Timestamp (TDateTimeOffset, TDateTime, TDateOnly, TTimeOnly)
+    //Timestamp
     DateOnly,
     TimeOnly,
     Local,
     UnknownLocal,
-    
-    //Integer (TInteger)
-    Decimal,
-    Hex,
-    Octal,
-    Binary,
-    
-    //Floating Point (TFloat)
+
+    //Integer
+    Binary = 2,
+    Octal = 8,
+    Decimal = 10,
+    Hex = 16,
+
+    //Float
     Nan,
     PositiveNan,
     NegativeNan,
 }
 
 
-//Tokens are essentially bloated pointers, with some extra stored type information, to values in the value-list.
+//Tokens are essentially fat pointers, with some extra stored type information, to values in the value-list.
 //Structural tokens hold no reference (index is -1).
 public readonly record struct TOMLValue : IEquatable<TOMLValue>
 {
     internal TomlTokenType TokenType { get; init; }
 
     internal int ValueIndex { get; init; }
-
 
     public TOMLValue(TomlTokenType type, int vIndex = -1)
     {

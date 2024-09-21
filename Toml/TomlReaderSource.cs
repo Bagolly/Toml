@@ -10,7 +10,7 @@ using System.Threading.Tasks;
 
 namespace Toml.Reader;
 
-sealed class TomlStreamSource : ITomlReaderSource, IDisposable
+public sealed class TomlStreamSource : ITomlReaderSource, IDisposable
 {
     private StreamReader BaseReader { get; init; }
 
@@ -19,26 +19,25 @@ sealed class TomlStreamSource : ITomlReaderSource, IDisposable
         if (!source.CanRead || !source.CanSeek)
             throw new ArgumentException("Streams without read or seeking support cannot be used.");
 
-
         //Throw on invalid UTF8, don't emit BOM, and do not detect encoding; it MUST be valid UTF8, otherwise it's an error that should be caught.
         BaseReader = new(source, new UTF8Encoding(false, true), false);
     }
 
-
+    
     public int Read() => BaseReader.Read();
-
 
     public int Peek() => BaseReader.Peek();
 
     public int ReadBlock(Span<char> buffer) => BaseReader.ReadBlock(buffer);
 
-
     public void Dispose() => BaseReader.Dispose();
 }
 
 
-
-sealed class TomlStringSource : ITomlReaderSource
+/// <summary>
+/// Encapsulates a managed string as an input source for the TOML Tokenizer.
+/// </summary>
+public sealed class TomlStringSource : ITomlReaderSource
 {
     internal string Source { get; init; }
 
@@ -61,16 +60,15 @@ sealed class TomlStringSource : ITomlReaderSource
         if (_pos >= Source.Length) //read already finished
             return 0;
 
-
-        var substring = buffer.Length <= Source.Length - _pos ? //If there are more remaining characters than the buffer can hold,
-                       Source.AsSpan(_pos, buffer.Length) :     //only read as much as the buffer can hold;
-                       Source.AsSpan(_pos);                     //otherwise, read to end.
+        var substring = buffer.Length <= Source.Length - _pos ? //If there are more remaining characters than the buffer can hold, 
+                       Source.AsSpan(_pos, buffer.Length) :     //only read as much as the buffer can hold; [COMMON]
+                       Source.AsSpan(_pos);                     //otherwise, read to end.                   [RARE]
 
         substring.CopyTo(buffer);
+
 
         _pos += substring.Length; //Set seeker forward by the amount of characters read
 
         return substring.Length;
     }
-
 }

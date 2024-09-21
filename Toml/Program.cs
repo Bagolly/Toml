@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using CommandLine;
 using System.Collections;
+using Toml.Reader;
 
 namespace Toml;
 
@@ -20,99 +21,143 @@ internal class Program
 {
     static void Main()
     {
+        //C:\Users\BAGOLY\Desktop\Toml\TomlTesting\te
+        Console.WriteLine(Directory.Exists("../../../../TomlTesting/tests/invalid"));
+
+
+        _ = 1;
+
         Console.OutputEncoding = Encoding.UTF8;
         Stopwatch sw = new();
 
-    
-        using FileStream fs = new("C:/Users/BAGOLY/Desktop/TOML Project/TomlTest/gigatest2.txt", FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan);
 
-        TOMLTokenizer t = new(fs);
-        
+        /*
+            current big task: implementing deserialization. first need to resolve the comment problem.
+            some other things not covered by metadata: 
+            - datetime separator 'T' or whitespace? currently not saved, should use 'T' by default, maybe make optional.
+            - float exponents?                      currently not saved, so it is subject to .net formatting. Look into using 'r' for round trip.
+            - casing for keys?                      should use existing names by default, but serializing a .net object? what are the rules for that?
+            - multiline and/or literal strings? the metadata should help, but might be some issues for example leading new line, line ending backslash, etc.
+
+            other big tasks:
+            -streaming (SAX) parser interface
+         */
+
+        //  BuildBenchMark();
+
+        using FileStream fs = new("C:/Users/BAGOLY/Desktop/TOML Project/TomlTest/big.toml",
+                                  FileMode.Open, FileAccess.Read, FileShare.Read,
+                                  bufferSize: 8192,
+                                  FileOptions.SequentialScan);
+        using TomlStreamSource source = new(fs);
+
+
+        TOMLTokenizer t = new(source, comments: TomlCommentMode.Store);
+
         sw.Start();
-        var (tStream, values) = t.TokenizeFile();
+        t.TokenizeFile();
         sw.Stop();
 
+        if (t.Comments?.Count > 0)
+        {
+            if (t.Comments[0].IsTopLevel)
+            {
+                Console.WriteLine("Found top-level comments: ");
 
-        if (t.ErrorLog.IsValueCreated)
+                for (int i = 0; i < t.Comments.Count && t.Comments[i].IsTopLevel; i++)
+                    Console.WriteLine(t.Comments[i]);
+            }
+            else
+            {
+                Console.WriteLine("No top-level comments were found.");
+            }
+
+            Console.WriteLine("=====");
+
+            foreach (var v in t.Values)
+            {
+                Console.WriteLine($"Type: {v.Type} | Value: {v} ");
+                if (v.CommentSameLine is not -1)
+                    Console.WriteLine("\tAlso has attached same-line comment: " + t.Comments![v.CommentSameLine]);
+                if (v.CommentBelow is not -1)
+                    Console.WriteLine("\tAlso has attached below-line comment: " + t.Comments![v.CommentBelow]);
+            }
+        }
+
+        else
+            Console.WriteLine("No comments were found.");
+
+
+        if (t.ErrorLog.Count is not 0)
         {
             Console.WriteLine("Parsing could not start because of the following errors:");
 
             #region Error logging
             Console.ForegroundColor = ConsoleColor.Red;
-            
-            foreach (var msg in t.ErrorLog.Value)
+
+            foreach (var msg in t.ErrorLog)
                 Console.WriteLine(msg);
-            
+
             Console.ResetColor();
             #endregion
 
             return;
         }
 
+
         var parser = new TOMLParser(t.TokenStream, t.Values);
 
+
+        Console.WriteLine(t.TokenStream.Count);
+
+
         sw.Start();
-        parser.Parse();
+        TTable root = parser.Parse();
         sw.Stop();
 
-        Console.WriteLine("Elapsed: " + sw.ElapsedMilliseconds); //about 250-280ms for gigatest2.toml
+
+        /*
+        TomlJsonMapper mapper = new();
+        string result = mapper.ToJson(root);
+        using StreamWriter swriter = new("C:/Users/BAGOLY/Desktop/output.json");
+        swriter.WriteLine(result);
+        */
+
+
+        Console.WriteLine("Elapsed: " + sw.ElapsedMilliseconds + "ms"); //about 250-280ms for gigatest2.toml
     }
 
-
-    private static Stream FromString(string s)//testing only
+    private static void BuildBenchMark()
     {
-        MemoryStream stream = new();
-        StreamWriter writer = new(stream);
-        writer.Write(s);
-        writer.Flush();
-        stream.Position = 0;
-        return stream;
-    }
+        StringBuilder sb = new(8192 - 1);
+        Random r = new();
 
-    private static int ProcessFile(Stream stream, bool printLog)
-    {
-        //Uncaught exception: -2, Invalid file: -1, Success: 0
-        try
+        for (int i = 0; i < 100_000; ++i)
         {
-            using FileStream fs = new("C:/Users/BAGOLY/Desktop/TOML Project/TomlTest/otherlargetest.txt", FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan);
-
-            TOMLTokenizer t = new(fs);
-            var (tStream, values) = t.TokenizeFile();
-
-
-            if (t.ErrorLog.IsValueCreated)
+            switch (r.NextDouble())
             {
-                if (printLog)
-                {
-                    Console.WriteLine("Parsing could not start because of the following errors:");
-
-                    Console.ForegroundColor = ConsoleColor.Red;
-
-                    foreach (var msg in t.ErrorLog.Value)
-                        Console.WriteLine(msg);
-
-                    Console.ResetColor();
-                }
-
-                return -1;
+                case > 0.66:
+                    sb.Append($"key{i} = 0x{Convert.ToString(r.Next(), 16)}\n");
+                    break;
+                case > 0.33:
+                    sb.Append($"key{i} = 0b{Convert.ToString(r.Next(), 2)}\n");
+                    break;
+                default:
+                    sb.Append($"key{i} = 0o{Convert.ToString(r.Next(), 8)}\n");
+                    break;
             }
-
-
-            TOMLParser p = new(tStream, values);
-            var root = p.Parse();
-
-
-            return 0;
         }
 
-        catch { return -2; }
+        using StreamWriter sw = new("C:/Users/BAGOLY/Desktop/TOML Project/TomlTest/synth.txt");
+
+        sw.Write(sb);
     }
 }
 
 
 //This type maps TOML structures directly to C#-equivalent ones, and vica versa. (Only used for testing)
 public static class TomlDirectMapper
-{   
+{
     //TOML to C#
     public static Dictionary<string, object> MapDocument(TTable root) => MapTable(root);
 
@@ -158,7 +203,7 @@ public static class TomlDirectMapper
     {
         TArray result = new(array.Count);
 
-        foreach(var element in array)
+        foreach (var element in array)
             result.Add(MapObject(element));
 
         return result;
@@ -184,7 +229,7 @@ public static class TomlDirectMapper
     private static object MapValue(TObject obj) => obj switch
     {
         TString s => s.Value,
-        TBool b  => b.Value,
+        TBool b => b.Value,
         TInteger i => i.Value,
         TFloat f => f.Value,
         TDateOnly d => d.Value,
@@ -199,10 +244,10 @@ public static class TomlDirectMapper
     //C# to TOML
     private static TObject MapValue(object obj) => obj switch
     {
-        string s => new TString(s),
-        char c => new TString([c]),
+        string s => new TString(s, TomlTokenMetadata.Basic),
+        char c => new TString([c], TomlTokenMetadata.Basic),
         bool b => new TBool(b),
-        long or uint or int or short or ushort or byte or sbyte => new TInteger(Convert.ToInt64(obj)),
+        long or uint or int or short or ushort or byte or sbyte => new TInteger(Convert.ToInt64(obj), TomlTokenMetadata.Decimal),
         float or double => new TFloat(Convert.ToDouble(obj)),
         DateOnly d => new TDateOnly(d),
         TimeOnly t => new TTimeOnly(t),
@@ -216,14 +261,15 @@ public static class TomlDirectMapper
 
 
 public sealed class TomlJsonMapper
-{
-    private static string SerializeValue<T>(TValue<T> val) => $$"""{"type": "{{val.SerializeType()}}", "value": "{{val.SerializeValue()}}"}""";
+{                                               //todo: handle escaped chars for valid json
+    private static string SerializeValue<T>(TValue<T> val) where T : notnull
+        => $$"""{"type": "{{val.Type}}", "value": "{{val.Value}}"}""";
 
     private static string PrintValue(TObject obj) => obj.Type switch
     {
         TObject.TOMLType.String => SerializeValue((TValue<string>)obj),
         TObject.TOMLType.Integer => SerializeValue((TValue<long>)obj),
-        TObject.TOMLType.Float => SerializeValue((TValue<float>)obj),
+        TObject.TOMLType.Float => SerializeValue((TValue<double>)obj),
         TObject.TOMLType.Boolean => SerializeValue((TValue<bool>)obj),
         TObject.TOMLType.DateTimeOffset => SerializeValue((TValue<DateTimeOffset>)obj),
         TObject.TOMLType.DateTimeLocal => SerializeValue((TValue<DateTime>)obj),
@@ -271,7 +317,6 @@ public sealed class TomlJsonMapper
         foreach (var (key, val) in table)
         {
             PrintKeyValuePair(key, val);
-            _builder.Append(",\n");
         }
 
         _builder.Remove(_builder.Length - 2, 2); //Remove trailing comma and linefeed on last key/value pair.
@@ -311,6 +356,8 @@ public sealed class TomlJsonMapper
         Append($"\"{key}\": ");
 
         PrintObject(value);
+
+        _builder.Append(",\n");
     }
 
     private void PrintObject(TObject value) //Prints any TObject

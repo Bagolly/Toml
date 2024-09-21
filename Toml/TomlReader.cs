@@ -8,6 +8,12 @@ using static Toml.Tokenization.Constants;
 using System.Threading.Tasks;
 using Toml.Runtime;
 using System.IO;
+using System.Diagnostics;
+using System.Numerics;
+using System.Runtime.Intrinsics;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using CommandLine;
 
 namespace Toml.Reader;
 
@@ -20,14 +26,15 @@ public interface ITomlReaderSource
     /* Regarding UTF-8 validation
        Only the default TomlStreamSource does complete UTF-8 validation.
      
-       If you provide your own implementation, you should throw a DecoderException
-       to indicate an UTF-8 encoding issue in the document.
-       The tokenizer catches these and reports them appropriately.
+       If you provide your own implementation, you are responsible for
+       indicating an UTF-8 encoding issue in the document. 
+       Since StreamReader throws a DecoderException, this is caught and reported internally.
+       The tokenizer catches and reports them appropriately.
 
        The tokenizer does validate escape sequences and line-endings,
-       as well as control characters in strings and comments.
+       as well as control characters in strings and comments,
        
-       But because it works with characters and not bytes, it cannot detect an invalid
+       but because it works with characters and not bytes, it cannot detect an invalid
        UTF-8 byte sequence.
      */
 
@@ -61,7 +68,7 @@ public interface ITomlReaderSource
                      available it should return as many as available.
                      Essentially, the returned amount of characters should ALWAYS be between  0 and buffer.Length - 1 (both inclusive).
                      Newlines and new line characters should be returned as well, without any special handling, and MUST NOT be removed,
-                     otherwise the line and column tracker in the tokenizer will be inaccurate (especially for documents with lots of timestamps).
+                     otherwise the line and column tracker in the tokenizer will be inaccurate (especially for documents with lots of timestamps, don't ask).
 
                      See the documentation for StreamReader.ReadBlock() for more details on expected behavior and/or implementation.
      */
@@ -71,7 +78,7 @@ public interface ITomlReaderSource
 
 
 /// <summary>
-/// Provides the base implementation for a reader capable of providing input for the TOML tokenizer.
+/// Represents a reader for providing input to the TOML tokenizer.
 /// </summary>
 class TomlReader
 {
@@ -245,13 +252,15 @@ class TomlReader
     /// <summary>
     /// Wraps the base readers ReabBlock method to enable tracking position.
     /// </summary>
-    public int ReadBlock(Span<char> buffer)
+    public unsafe int ReadBlock(Span<char> buffer)
     {
+        Debug.Assert(buffer.Length < 512, "Possible misuse; the provided buffer is unusually large. Please double check if you actually intended to call this method!");
+
         int readResult = Source.ReadBlock(buffer);
 
         int lineIndex = buffer.IndexOf(LF); //It doesn't matter whether it's a CR or CRLF line-ending; only a line feed causes a line increase.
 
-
+    
         if (lineIndex is not -1)
         {
             ++Line;
@@ -275,7 +284,15 @@ class TomlReader
     /// </summary>
     /// <returns><see langword="true"/> if a line ending was matched; otherwise <see langword="false"/>.</returns>
     public bool MatchLineEnding()
-    {   
+    {
+        //should EOF count? Probably. But changing now could break previous code, so this stays.
+
+        //Because this method is used in certain loops, this short circuit should help with most calls,
+        //since the common case there is no line ending (and maybe even help the branch predictor?).
+        if (Source.Peek() > CR)
+            return false;
+
+
         switch(Source.Peek())
         {   
             case LF:
@@ -350,6 +367,7 @@ class TomlReader
     /// Returns the next available character, without consuming it.
     /// </summary>
     /// <returns>-1 if there are no characters to be read; otherwise, the next available character.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public int Peek() => Source.Peek();
 
 

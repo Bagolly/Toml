@@ -8,16 +8,39 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
+	<PropertyGroup>
+		<!--Huge performance gains (relatively speaking) possible with both R2R and AOT:
+			Input file: gigatest2.txt (the 4mb one...)
+			Measurement1: With BenchmarkDotNet. Note: this includes ALL work ever done by the code, 
+			              including IO (not that relevant however, see note below).
+			<|BASELINE|>:   Release | No Debugger: ~102ms mean, but also a large 250-270ms+ first time 
+			                run because of JIT overhead.
+			Measurement2: With Stopwatch, reported by the application on stdout. 
+			              Measures only tokenization and parsing, not IO.
+						  Note: work is not IO bound, TOML files are small, IO work irrelevant.
+			<|ReadyToRun|>: hybrid AOT, contains both IL and native code, requires .NET on host machine.
+			                Methods partake in tiered compilation, and some methods are JIT-only, no native
+							generated. Larger binary size.
+							Performance: 26ms, highly stable regardless of times called.
+			<|Native AOT|>: full native executable, does not require .NET on host machine. 
+			                Even larger binary size (~1200KB from ~136KB), 
+							but also, even faster.
+							Performance: 16ms, highly stable just like R2R.-->
+		<PublishAot>false</PublishAot>              <!--TOGGLE AOT PUBLISH HERE-->
+		<PublishReadyToRun>true</PublishReadyToRun> <!--TOGGLE R2R PUBLISH HERE-->
+	</PropertyGroup>
+	
   <ItemGroup>
     <Compile Remove="OldParser.cs" />
     <Compile Remove="TOMLOld.cs" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="BenchmarkDotNet" Version="0.13.12" />
+    <PackageReference Include="BenchmarkDotNet" Version="0.14.0" />
   </ItemGroup>
 
 	<ItemGroup>
 		<InternalsVisibleTo Include="TomlJsonConvert" />
+		<InternalsVisibleTo Include="TomlTesting"/>
 	</ItemGroup>
 </Project>

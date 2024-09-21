@@ -5,7 +5,7 @@ using System.Runtime.InteropServices;
 
 namespace Toml
 {
-    //Modified .NET internal code.
+    //Copied then modified from .NET (internal) code.
     //Uses a stack-allocated buffer of the assigned capacity, and rents an array from the shared ArrayPool if more memory is needed.
     public ref struct ValueStringBuilder //MUST BE PASSED AS REF WHEN ARGUMENT!
     {
@@ -89,7 +89,7 @@ namespace Toml
         /// </summary>
         public override string ToString()
         {
-            string s = _chars[.._appendedCharCount].ToString();
+            string s = _chars.Slice(0, _appendedCharCount).ToString();
             Dispose();
             return s;
         }
@@ -113,17 +113,17 @@ namespace Toml
                 _chars[Length] = '\0';
             }
 
-            return _chars[.._appendedCharCount];
+            return _chars.Slice(0, _appendedCharCount);
         }
 
-        public readonly ReadOnlySpan<char> AsSpan() => _chars[.._appendedCharCount];
-        public readonly ReadOnlySpan<char> AsSpan(int start) => _chars[start.._appendedCharCount];
+        public readonly ReadOnlySpan<char> AsSpan() => _chars.Slice(0,_appendedCharCount);
+        public readonly ReadOnlySpan<char> AsSpan(int start) => _chars.Slice(start, _appendedCharCount - start);
         public readonly ReadOnlySpan<char> AsSpan(int start, int length) => _chars.Slice(start, length);
 
 
         public bool TryCopyTo(Span<char> destination, out int charsWritten)
         {
-            if (_chars[.._appendedCharCount].TryCopyTo(destination))
+            if (_chars.Slice(0, _appendedCharCount).TryCopyTo(destination))
             {
                 charsWritten = _appendedCharCount;
                 Dispose();
@@ -145,7 +145,7 @@ namespace Toml
 
             int remaining = _appendedCharCount - index;
 
-            _chars.Slice(index, remaining).CopyTo(_chars[(index + count)..]);
+            _chars.Slice(index, remaining).CopyTo(_chars.Slice(index + count));
             _chars.Slice(index, count).Fill(value);
 
             _appendedCharCount += count;
@@ -165,8 +165,8 @@ namespace Toml
 
             int remaining = _appendedCharCount - index;
 
-            _chars.Slice(index, remaining).CopyTo(_chars[(index + count)..]);
-            s.CopyTo(_chars[index..]);
+            _chars.Slice(index, remaining).CopyTo(_chars.Slice(index + count));
+            s.CopyTo(_chars.Slice(index));
 
             _appendedCharCount += count;
         }
@@ -214,7 +214,7 @@ namespace Toml
             if (pos > _chars.Length - s.Length)
                 Grow(s.Length);
 
-            s.CopyTo(_chars[pos..]);
+            s.CopyTo(_chars.Slice(pos));
             _appendedCharCount += s.Length;
         }
 
@@ -257,7 +257,7 @@ namespace Toml
             if (pos > _chars.Length - value.Length)
                 Grow(value.Length);
 
-            value.CopyTo(_chars[_appendedCharCount..]);
+            value.CopyTo(_chars.Slice(_appendedCharCount));
             _appendedCharCount += value.Length;
         }
 
@@ -300,7 +300,7 @@ namespace Toml
             // Make sure to let Rent throw an exception if the caller has a bug and the desired capacity is negative
             char[] poolArray = ArrayPool<char>.Shared.Rent((int)Math.Max((uint)(_appendedCharCount + additionalCapacityBeyondPos), (uint)_chars.Length * 2));
 
-            _chars[.._appendedCharCount].CopyTo(poolArray);
+            _chars.Slice(0, _appendedCharCount).CopyTo(poolArray);
 
             char[]? toReturn = _arrayToReturnToPool;
             _chars = _arrayToReturnToPool = poolArray;

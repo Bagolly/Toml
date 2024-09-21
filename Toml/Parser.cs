@@ -31,6 +31,13 @@ public sealed class TOMLParser
     }
 
 
+    public TOMLParser(TOMLTokenizer tokenizer)
+    {
+        (TokenStream, Values) = tokenizer.TokenizeFile();
+        DocumentRoot = new(TOMLType.HeaderTable);
+    }
+
+
     public TTable Parse()
     {
         TTable localRoot = DocumentRoot; //see documentation on local root for more info about this variable.
@@ -40,32 +47,27 @@ public sealed class TOMLParser
         {
             switch (currentToken.TokenType)
             {
-                case Eof:
-                    goto FINISH;
-
-
                 case Key: //simple keys restricted to current scope.
                     AddKeyValuePair(to: localRoot);
                     break;
-
-
-                case ImplicitKeyValueTable: //dotted keyval pairs (and ONLY those, headers are parsed below)
-                    AddKeyValuePair(ResolveKeyValuePath(localRoot));
-                    break;
-
-
-                case ArrayTableStart: //arraytable declarations that change the scope to their last defined table.
-                    
-                    localRoot.CloseTable();
-                    localRoot = AddArrayTable(DocumentRoot);
-                    break;
-
 
                 case TableStart: //table declarations that change the scope to the declared table.
                     localRoot.CloseTable();
                     localRoot = AddTable(DocumentRoot);
                     break;
 
+                case ImplicitKeyValueTable: //dotted keyval pairs (and ONLY those, headers are parsed below)
+                    AddKeyValuePair(ResolveKeyValuePath(localRoot));
+                    break;
+
+                case ArrayTableStart: //arraytable declarations that change the scope to their last defined table.
+
+                    localRoot.CloseTable();
+                    localRoot = AddArrayTable(DocumentRoot);
+                    break;
+
+                case Eof:
+                    goto FINISH;
 
                 default:
                     Console.WriteLine("Unexpected token: " + currentToken);
@@ -82,12 +84,12 @@ public sealed class TOMLParser
     {
         while (TokenStream.Peek().TokenType is ImplicitKeyValueTable)
         {
-            TFragment fragment = (TFragment)NextValue();
+            TKey fragment = (TKey)NextValue();
 
             if (containing.Values.TryGetValue(fragment.Value, out var existingValue)) //It is not yet known if it's actually a table.
             {
                 if (existingValue is not TTable existingTable)
-                    throw new TomlRuntimeException("Invalid path blabla");
+                    throw new TomlRuntimeException($"Invalid path; expected {fragment} to refer to a table, not a {existingValue.Type}.");
 
 
                 if (existingTable.Type is TOMLType.HeaderTable)
@@ -121,12 +123,11 @@ public sealed class TOMLParser
     {
         while (TokenStream.Peek().TokenType is ImplicitHeaderTable)
         {
-            TFragment fragment = (TFragment)NextValue();
+            TKey fragment = (TKey)NextValue();
 
 
             if (containing.Values.TryGetValue(fragment.Value, out var existingValue)) //It is not yet known if it's actually a table.
             {
-
 
                 if (existingValue is TArray existingArrayTable)
                 {
@@ -136,7 +137,7 @@ public sealed class TOMLParser
                     else
                         return ResolveHeaderPath((TTable)existingArrayTable[^1]);
                 }
-                
+
 
                 if (existingValue is not TTable existingTable)
                     throw new TomlRuntimeException($"Invalid path, {existingValue} is not a table.");
@@ -146,7 +147,7 @@ public sealed class TOMLParser
                 /* 
                    a.b = 2
                    [a]
-                   k = 123
+                   k = 123 # would inject directly into the closed scope of 'a'.
                  */
                 if (existingTable.Type is TOMLType.KeyValTable && existingTable.State is TomlTableState.Closed)
                     throw new TomlRuntimeException($"Cannot redeclare table '{fragment.Value}' because it was defined via dotted keys in another table (or root).");
@@ -183,7 +184,7 @@ public sealed class TOMLParser
             containing = ResolveHeaderPath(containing);
 
 
-        if(TokenStream.Peek().TokenType is not TableDecl)
+        if (TokenStream.Peek().TokenType is not TableDecl) //todo remove temp debug code
         {
             Console.WriteLine(TokenStream.Peek().TokenType);
             _ = 1;
@@ -202,7 +203,7 @@ public sealed class TOMLParser
             throw new TomlRuntimeException("Table header's dotted key is missing the table itself; uncaught syntax error.");
 
 
-        if (keyToken.TokenType is Eof || Values[keyToken.ValueIndex] is not TFragment tableKey)
+        if (keyToken.TokenType is Eof || Values[keyToken.ValueIndex] is not TKey tableKey)
             throw new TomlRuntimeException($"Expected a table declaration, but found a token of type '{keyToken.TokenType}'");
 
 
@@ -212,7 +213,7 @@ public sealed class TOMLParser
             {
                 if (existingTable.Type is TOMLType.HeaderTable && existingTable.State is TomlTableState.Open)
                     return existingTable; //scope change will set this to Closed upon exit, so the next declaration should throw
-                
+
 
                 //Existing header table is already closed -> redeclaration error.
                 if (existingTable.Type is TOMLType.HeaderTable && existingTable.State is TomlTableState.Closed)
@@ -244,14 +245,14 @@ public sealed class TOMLParser
             throw new TomlRuntimeException("Arraytable header's dotted key is missing the table itself; uncaught syntax error.");
 
 
-        if (keyToken.TokenType is Eof || Values[keyToken.ValueIndex] is not TFragment key)
+        if (keyToken.TokenType is Eof || Values[keyToken.ValueIndex] is not TKey key)
             throw new TomlRuntimeException($"Expected a table declaration, but found a token of type <{keyToken.TokenType}>");
 
 
         //Arraytables are a bit different when it comes to "redeclarations", since every new declaration adds a new table to the array,
         //and every reference to it should return its last defined table.
         if (containingTable.Values.TryGetValue(key.Value, out TObject? existingValue))
-        {   
+        {
             //Not an array
             if (existingValue is not TArray existingArrayTable)
                 throw new TomlRuntimeException($"A value for the key '{key.Value}' already exists, but had the type {existingValue.Type}, instead of arraytable.");
@@ -263,7 +264,7 @@ public sealed class TOMLParser
 
 
             else
-            {   
+            {
                 //This element should be inaccesible from now on anyways, but better to close it properly, since it goes out of scope here.
                 ((TTable)existingArrayTable.Values[^1]).CloseTable();
 
@@ -287,7 +288,7 @@ public sealed class TOMLParser
             throw new TomlRuntimeException("Not enough tokens to resolve the key/value pair, possibly because of a syntax error.");
 
 
-        if (keyToken.TokenType is Eof || Values[keyToken.ValueIndex] is not TFragment key)
+        if (keyToken.TokenType is Eof || Values[keyToken.ValueIndex] is not TKey key)
             throw new TomlRuntimeException($"Expected a key to start a key/value pair, but found a token of type '{keyToken.TokenType}'");
 
 
@@ -357,8 +358,6 @@ public sealed class TOMLParser
         {
             if (token.TokenType is ImplicitKeyValueTable)
             {
-                //currentScope = ResolvePath(origin: inlineTable); //build path with inline as root
-
                 AddKeyValuePair(to: ResolveKeyValuePath(inlineTable));
 
 

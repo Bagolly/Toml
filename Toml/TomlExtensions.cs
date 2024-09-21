@@ -25,7 +25,7 @@ public static class TomlExtensions
 
     public static TArray? AsArrayOrDefault(this TObject obj) => obj.Type is not (TOMLType.Array or TOMLType.ArrayTable) ? default: (TArray)obj;
     
-    public static TTable? AsTableOrDefault(this TObject obj) => obj.Type is not TOMLType.HeaderTable or TOMLType.KeyValTable or TOMLType.InlineTable ? default : (TTable)obj;
+    public static TTable? AsTableOrDefault(this TObject obj) => obj.Type is not (TOMLType.HeaderTable or TOMLType.KeyValTable or TOMLType.InlineTable) ? default : (TTable)obj;
 
 
 
@@ -34,19 +34,11 @@ public static class TomlExtensions
     /// Otherwise, it returns the character representation of <paramref name="c"/>.
     /// <para>If <paramref name="c"/> is -1, the method returns EOF.</para>
     /// </summary>
-    internal static string GetFriendlyNameFor(int c)
+    internal static string GetFriendlyNameFor(int c) => c switch
     {
-        if (c is -1)
-            return "End of File";
-
-        if (c is 0x7F)
-            return "[DEL] (U+007F)";
-
-        //Only ASCII control chars have an acronym.
-        if (c < 33)
-            return $"[{ASCIIControlCharFriendlyName[c]}] (U+{c:X4})";
-
-
-        return $"{(char)c}";
-    }
+        EOF  => "End of File",
+        0x7F => "[DEL] (U+007F)",
+        < 33 => $"[{ASCIIControlCharFriendlyName[c]}] (U+{c:X4})", //Only these have an acronym
+        _    => $"{(char)c}",
+    };
 }
