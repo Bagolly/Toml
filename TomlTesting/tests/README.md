@@ -1,3 +1,5 @@
+(Copied along with license from the official TOML test suite by BurntSushi.)
+
 `toml-test` is a language-agnostic test suite to verify the correctness of
 [TOML] parsers and writers.
 
