@@ -12,6 +12,7 @@ using System.Runtime.InteropServices;
 using CommandLine;
 using System.Collections;
 using Toml.Reader;
+using System;
 
 namespace Toml;
 
@@ -21,43 +22,28 @@ internal class Program
 {
     static void Main()
     {
-        //C:\Users\BAGOLY\Desktop\Toml\TomlTesting\te
-        Console.WriteLine(Directory.Exists("../../../../TomlTesting/tests/invalid"));
-
-
-        _ = 1;
-
         Console.OutputEncoding = Encoding.UTF8;
         Stopwatch sw = new();
 
 
-        /*
-            current big task: implementing deserialization. first need to resolve the comment problem.
-            some other things not covered by metadata: 
-            - datetime separator 'T' or whitespace? currently not saved, should use 'T' by default, maybe make optional.
-            - float exponents?                      currently not saved, so it is subject to .net formatting. Look into using 'r' for round trip.
-            - casing for keys?                      should use existing names by default, but serializing a .net object? what are the rules for that?
-            - multiline and/or literal strings? the metadata should help, but might be some issues for example leading new line, line ending backslash, etc.
-
-            other big tasks:
-            -streaming (SAX) parser interface
-         */
-
-        //  BuildBenchMark();
-
-        using FileStream fs = new("C:/Users/BAGOLY/Desktop/TOML Project/TomlTest/big.toml",
+        using FileStream fs = new("C:/Users/BAGOLY/Desktop/TOML Project/TomlTest/test-realistic-small.txt",
                                   FileMode.Open, FileAccess.Read, FileShare.Read,
                                   bufferSize: 8192,
                                   FileOptions.SequentialScan);
-        using TomlStreamSource source = new(fs);
 
+        // using TomlStreamSource source = new(fs);
 
-        TOMLTokenizer t = new(source, comments: TomlCommentMode.Store);
+        TomlStringSource source = new("key = -9223372036854775808");
+
+        var config = new TomlConfig(TomlCommentMode.Store, Diagnostics.ErrorReportPolicy.Throw, Diagnostics.ErrorSeverity.Error);
+
+        TOMLTokenizer t = new(source, config);
 
         sw.Start();
-        t.TokenizeFile();
+        _ = t.TokenizeFile();
         sw.Stop();
 
+        /*
         if (t.Comments?.Count > 0)
         {
             if (t.Comments[0].IsTopLevel)
@@ -86,18 +72,18 @@ internal class Program
 
         else
             Console.WriteLine("No comments were found.");
+        */
 
-
-        if (t.ErrorLog.Count is not 0)
+        if (t.Logger.HasErrors)
         {
             Console.WriteLine("Parsing could not start because of the following errors:");
 
             #region Error logging
             Console.ForegroundColor = ConsoleColor.Red;
 
-            foreach (var msg in t.ErrorLog)
+            foreach (var msg in t.Logger.Errors)
                 Console.WriteLine(msg);
-
+        
             Console.ResetColor();
             #endregion
 
@@ -105,7 +91,7 @@ internal class Program
         }
 
 
-        var parser = new TOMLParser(t.TokenStream, t.Values);
+        var parser = new TOMLParser(t);
 
 
         Console.WriteLine(t.TokenStream.Count);
@@ -116,7 +102,7 @@ internal class Program
         sw.Stop();
 
 
-        /*
+        /* optional convert to json
         TomlJsonMapper mapper = new();
         string result = mapper.ToJson(root);
         using StreamWriter swriter = new("C:/Users/BAGOLY/Desktop/output.json");
@@ -125,32 +111,7 @@ internal class Program
 
 
         Console.WriteLine("Elapsed: " + sw.ElapsedMilliseconds + "ms"); //about 250-280ms for gigatest2.toml
-    }
 
-    private static void BuildBenchMark()
-    {
-        StringBuilder sb = new(8192 - 1);
-        Random r = new();
-
-        for (int i = 0; i < 100_000; ++i)
-        {
-            switch (r.NextDouble())
-            {
-                case > 0.66:
-                    sb.Append($"key{i} = 0x{Convert.ToString(r.Next(), 16)}\n");
-                    break;
-                case > 0.33:
-                    sb.Append($"key{i} = 0b{Convert.ToString(r.Next(), 2)}\n");
-                    break;
-                default:
-                    sb.Append($"key{i} = 0o{Convert.ToString(r.Next(), 8)}\n");
-                    break;
-            }
-        }
-
-        using StreamWriter sw = new("C:/Users/BAGOLY/Desktop/TOML Project/TomlTest/synth.txt");
-
-        sw.Write(sb);
     }
 }
 
@@ -259,135 +220,3 @@ public static class TomlDirectMapper
     };
 }
 
-
-public sealed class TomlJsonMapper
-{                                               //todo: handle escaped chars for valid json
-    private static string SerializeValue<T>(TValue<T> val) where T : notnull
-        => $$"""{"type": "{{val.Type}}", "value": "{{val.Value}}"}""";
-
-    private static string PrintValue(TObject obj) => obj.Type switch
-    {
-        TObject.TOMLType.String => SerializeValue((TValue<string>)obj),
-        TObject.TOMLType.Integer => SerializeValue((TValue<long>)obj),
-        TObject.TOMLType.Float => SerializeValue((TValue<double>)obj),
-        TObject.TOMLType.Boolean => SerializeValue((TValue<bool>)obj),
-        TObject.TOMLType.DateTimeOffset => SerializeValue((TValue<DateTimeOffset>)obj),
-        TObject.TOMLType.DateTimeLocal => SerializeValue((TValue<DateTime>)obj),
-        TObject.TOMLType.DateOnly => SerializeValue((TValue<DateOnly>)obj),
-        TObject.TOMLType.TimeOnly => SerializeValue((TValue<TimeOnly>)obj),
-        _ => throw new ArgumentException($"Objects with type <{obj.Type}> cannot be serialized as a value.", nameof(obj)),
-    };
-
-
-    private int _indentLevel;
-
-    private const int _indentChange = 2;
-
-
-    private StringBuilder _builder;
-
-
-    public TomlJsonMapper()
-    {
-        _indentLevel = 0;
-        _builder = new(64);
-    }
-
-
-    public string ToJson(TTable root)
-    {
-        PrintTable(root);
-
-        return _builder.ToString();
-    }
-
-
-    private void PrintTable(TTable table)
-    {
-        if (table.Values.Count == 0) //short circuit on empty tables
-        {
-            _builder.Append("{ }");
-            return;
-        }
-
-        _builder.Append("{\n");
-        _indentLevel += _indentChange;
-
-
-        foreach (var (key, val) in table)
-        {
-            PrintKeyValuePair(key, val);
-        }
-
-        _builder.Remove(_builder.Length - 2, 2); //Remove trailing comma and linefeed on last key/value pair.
-        _builder.Append('\n');
-        _indentLevel -= _indentChange;
-
-        Append('}');
-    }
-
-    private void PrintArray(TArray array)
-    {
-        if (array.Values.Count == 0) //short circuit on empty arrays
-        {
-            _builder.Append("[ ]");
-            return;
-        }
-
-        _builder.Append('[');
-        _indentLevel += _indentChange;
-
-        foreach (var element in array)
-        {
-            _builder.Append($"\n{GetIndent()}");
-            PrintObject(element);
-            _builder.Append(',');
-        }
-
-        _builder.Remove(_builder.Length - 1, 1); //Remove trailing comma on last element.
-        _indentLevel -= _indentChange;
-
-        _builder.Append($"\n{GetIndent()}]");
-    }
-
-
-    private void PrintKeyValuePair(string key, TObject value) //Print table elements
-    {
-        Append($"\"{key}\": ");
-
-        PrintObject(value);
-
-        _builder.Append(",\n");
-    }
-
-    private void PrintObject(TObject value) //Prints any TObject
-    {
-        if (value is TTable subtable)
-            PrintTable(subtable);
-
-
-        else if (value is TArray array)
-            PrintArray(array);
-
-        else
-            _builder.Append(PrintValue(value));
-    }
-
-
-    //Returns a string padding for the current indent level.
-    private string GetIndent() => new string(' ', _indentLevel);
-
-
-    private void Append(char c)
-    {
-        _builder.Append(GetIndent());
-        _builder.Append(c);
-    }
-
-
-    private void Append(string s)
-    {
-        _builder.Append(GetIndent());
-        _builder.Append(s);
-    }
-}

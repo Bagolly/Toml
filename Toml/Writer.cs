@@ -1,51 +1,42 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Runtime.InteropServices;
-using System.Text;
-using System.Threading.Tasks;
+﻿using System.Text;
 using static Toml.Tokenization.Constants;
 using Toml.Runtime;
-using System.IO;
 using System.Runtime.CompilerServices;
 using System.Diagnostics;
-using System.Diagnostics.CodeAnalysis;
 
-// ligature hell <|:::|> \/ +++ *** __ /\ ===  !== >>=>=|=//=//=>=>==>>
 
 namespace Toml.Writer;
-
 
 
 public class TomlWriter
 {   
     //could change visitor signatures to return stringbuilder explicitly to enable chaining if later required.
-    public void Visit(TTable table)
+    public virtual void Visit(TTable table)
     {
         throw new NotImplementedException();
     }
 
-    public void Visit(TArray array)
+    public virtual void Visit(TArray array)
     {
         throw new NotImplementedException();
     }
 
-    public void Visit(TKey key)
+    public virtual void Visit(TKey key)
     {
         throw new NotImplementedException();
     }
 
-    public void Visit(TComment comment)
+    public virtual void Visit(TComment comment)
     {
         throw new NotImplementedException();
     }
 
-    public void Visit(TString str)
+    public virtual void Visit(TString str)
     {
         throw new NotImplementedException();
     }
 
-    public void Visit(TInteger integer)
+    public virtual void Visit(TInteger integer)
     {
         switch (integer.Metadata)
         {
@@ -99,12 +90,12 @@ public class TomlWriter
         }
     }
 
-    public void Visit(TBool boolean)
+    public virtual void Visit(TBool boolean)
     {
         throw new NotImplementedException();
     }
 
-    public void Visit(TFloat number)
+    public virtual void Visit(TFloat number)
     {
         if (number.Value is double.PositiveInfinity && _options.NumberFormat.ExplicitPositiveSign)
             _sb.Append('+');
@@ -231,7 +222,7 @@ public class TomlWriter
             return true;
         }
 
-
+       
         /*The main group count is the (integral) number of main groups this number 
           can be divided into.
           First, the last group's length is subtracted to get the available # of

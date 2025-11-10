@@ -11,4 +11,10 @@
     <ProjectReference Include="..\Toml\Toml.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Reference Include="Tomlyn">
+      <HintPath>..\..\tomlyn\Tomlyn-main\src\Tomlyn\bin\Release\net8.0\Tomlyn.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
 </Project>

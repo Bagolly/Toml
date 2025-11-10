@@ -5,13 +5,14 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text;
 using Toml.Runtime;
-using static Toml.Extensions.TomlExtensions;
+using static Toml.Extensions.Extensions;
 using static Toml.Tokenization.TomlTokenMetadata;
 using static System.Char;
 using static Toml.Tokenization.Constants;
 using Toml.Reader;
 using System.Globalization;
-using System.Reflection.PortableExecutable;
+using Toml.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 
 
 namespace Toml.Tokenization;
@@ -29,31 +30,36 @@ public ref struct TOMLTokenizer
 
     internal readonly List<TComment>? Comments { get; }
 
-    
     private int _valueIndex = -1; //Tracks the last index of the list (like a stack).
 
     private int _commentIndex = -1; //Same deal with comments
 
-    public readonly List<string> ErrorLog { get; }
+    public readonly TomlDiagnosticsManager Logger { get; }
+    
+    private TomlCommentMode _commentPolicy;
 
-    private TomlCommentMode _commentMode;
 
-
-    public TOMLTokenizer(ITomlReaderSource source, int capacity = 32, TomlCommentMode comments = TomlCommentMode.Validate) //most document are at or larger, this amount of overalloc is probably fine.
+    public TOMLTokenizer(ITomlReaderSource source, TomlConfig config)
     {
-        Reader = new(source);
-        TokenStream = new(capacity);
+        Logger = new(config._policy, config._throwThreshold);
 
-        ErrorLog = new();
-
-        Values = new(capacity);
-
+        Reader = new(source, Logger);
         _builder = new(new char[256]);
-        
-        Comments = comments is TomlCommentMode.Store ? new() : null;
-        _commentMode = comments;
+
+        _commentPolicy = config._commentPolicy;
+
+     
+        Comments = _commentPolicy is TomlCommentMode.Store ? new() : null;
+
+        TokenStream = new(64);
+        Values = new(32);
     }
 
+    //Hints code analyzer about definite assignment when policy is Store, to stop it from requiring null forgiving.
+    [MemberNotNullWhen(true, "Comments")] //no longer used
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private readonly bool StoreComments() => _commentPolicy is TomlCommentMode.Store;
+    
 
     public (Queue<TOMLValue>, List<TObject>) TokenizeFile()
     {
@@ -67,7 +73,10 @@ public ref struct TOMLTokenizer
 
         catch (DecoderFallbackException)
         {
-            throw new TomlReaderException("An invalid UTF-8 byte sequence was encountered.", Reader.Line, Reader.Column);
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                           "An invalid UTF-8 byte sequence was encountered.",
+                           ErrorSeverity.Fatal,
+                           ErrorDomain.Reader));
         }
 
 
@@ -86,20 +95,20 @@ public ref struct TOMLTokenizer
         Debug.Assert(_valueIndex == Values.Count - 1, "ValueIndex is out of sync with list's count.");
     }
 
-    
-    private void SkipUntil(char syncChar)
+
+    private void SkipLine()
     {
         while (Reader.Peek() is not LF)
             if (Reader.Read() is EOF)
                 break;
     }
 
+
     private void TokenizeTopLevelElement()
     {
         //Top level elements are either keys, table declarations, or comments.
 
         Reader.SkipWhiteSpace(skipLineEnding: true);
-
 
         if (IsKey(Reader.Peek()))
         {
@@ -110,7 +119,6 @@ public ref struct TOMLTokenizer
         }
 
         int readResult = Reader.Read();
-
 
         switch (readResult)
         {
@@ -132,7 +140,7 @@ public ref struct TOMLTokenizer
     }
 
 
-    private void AssertEOL() //was previously local but not possible for ref structs
+    private void AssertEOL()
     {
         if (Reader.PeekSkip() is CommentStart)
         {
@@ -143,19 +151,23 @@ public ref struct TOMLTokenizer
         Reader.SkipWhiteSpace();
 
         if (!Reader.MatchLineEnding() && Reader.Peek() is not EOF)
-            ErrorLog.Add($"{Reader.Position}: Found trailing characters starting from {Reader.Position}");
+        {
+            Logger.Add(new TomlSyntaxError(Reader.Line,
+                           Reader.Column,
+                           "Found trailing characters starting from this position.",
+                           ErrorSeverity.Error,
+                           ErrorDomain.Tokenizer));
+        }
     }
 
 
-
-    private void ProcessComment(int callsiteId)
+    private void ProcessComment([ConstantExpected] int callsiteId)
     {
         // Control is passed to this method when Tokenize() encounters a '#' character.
-        // The '#' character is already consumed.
 
         _builder.ResetPointer();
 
-        switch (_commentMode)
+        switch (_commentPolicy)
         {
             case TomlCommentMode.Validate:
                 ValidateComment();
@@ -187,16 +199,25 @@ public ref struct TOMLTokenizer
                 if (readResult is Tab or Space)
                     continue;
 
-                ErrorLog.Add($"Found control character {GetFriendlyNameFor(readResult)} in comment. Tab is the only allowed control character inside comments.");
-                SkipUntil(LF);
+                Logger.Add(new TomlSyntaxError(
+                    Reader.Line, Reader.Column,
+                    $"Invalid control character in comment: {GetFriendlyNameFor(readResult)}",
+                    ErrorSeverity.Error,
+                    ErrorDomain.Tokenizer));
+
+                SkipLine();
                 return;
             }
         }
     }
 
 
-    private void StoreComment(int callsiteId)
+    private void StoreComment([ConstantExpected] int callsiteId)
     {
+        Debug.Assert(_commentPolicy is TomlCommentMode.Store, "Tried to store a comment but comment list was null.");
+        if (StoreComments())
+            throw new TomlInternalException(new("Attempted to store comment with non-store policy.", ErrorSeverity.Fatal, ErrorDomain.Internal));
+
         int readResult;
 
         while (!Reader.MatchLineEnding())
@@ -206,8 +227,13 @@ public ref struct TOMLTokenizer
 
             if (IsControl((char)readResult) && readResult is not Tab or Space)
             {
-                ErrorLog.Add($"Found control character {GetFriendlyNameFor(readResult)} in comment. Tab is the only allowed control character inside comments.");
-                SkipUntil(LF);
+                Logger.Add(new TomlSyntaxError(
+                    Reader.Line, Reader.Column,
+                    $"Invalid control character in comment: {GetFriendlyNameFor(readResult)}",
+                    ErrorSeverity.Error,
+                    ErrorDomain.Tokenizer));
+
+                SkipLine();
                 return;
             }
 
@@ -217,27 +243,27 @@ public ref struct TOMLTokenizer
 
         //Comment on top of document, nothing to attach to.
         if (TokenStream.Count is 0)
-        {   
-            Comments!.Add(new TComment(_builder.AsSpan(), -2, true)!); //-2 marks a noattach comment.
+        {
+            Comments.Add(new TComment(_builder.AsSpan(), -2, true)); //-2 marks a noattach comment.
             _commentIndex++; //Counting must still go up else it becomes out of sync.
         }
 
 
         else
         {
-            Comments!.Add(new TComment(_builder.AsSpan(), _commentIndex++)!);
+            Comments.Add(new TComment(_builder.AsSpan(), _commentIndex++));
             Debug.Assert(_commentIndex == Comments.Count - 1, "CommentIndex is out of sync with list's count");
 
 
             if (callsiteId is 1) //attach as below
                 Values[Values.Count - 1].CommentBelow = _commentIndex;
-            
+
             else //callsites 2 and 3; attach same line
                 Values[Values.Count - 1].CommentSameLine = _commentIndex;
         }
 
 
-        _builder.ResetPointer(); //comment added, buffer can be marked for overwrite
+        _builder.ResetPointer(); //comment added, release used buffer space.
     }
 
 
@@ -246,7 +272,7 @@ public ref struct TOMLTokenizer
         //Control is passed to this method from TokenizeArray() or TokenizeKeyValuePair()
         //No characters are consumed, including opening delimiters for strings.
 
-        
+
         _builder.ResetPointer();
 
 
@@ -276,27 +302,36 @@ public ref struct TOMLTokenizer
                 return;
 
             case EOF:
-                ErrorLog.Add($"{Reader.Position}: Expected a value to follow, but the end of the file was reached.");
+                Logger.Add(new TomlSyntaxError(
+                    Reader.Line, Reader.Column,
+                    "Expected a value to follow, but the end of the file was reached.",
+                    ErrorSeverity.Error,
+                    ErrorDomain.Tokenizer));
                 break;
 
             default:
-                if(IsAsciiDigit((char)peekResult) || peekResult is 'i' or 'n' or '+' or '-')
+                if (IsAsciiDigit((char)peekResult) || peekResult is 'i' or 'n' or '+' or '-')
                 {
                     TokenizeNumber();
                     return;
                 }
 
-                ErrorLog.Add($"{Reader.Position}: Expected a TOML value, but no value can start with the character '{GetFriendlyNameFor(peekResult)}'");
+                Logger.Add(new TomlSyntaxError(
+                   Reader.Line, Reader.Column,
+                   $"Expected a TOML value. No value can start with '{GetFriendlyNameFor(peekResult)}'",
+                   ErrorSeverity.Error,
+                   ErrorDomain.Tokenizer));
                 break;
         }
 
         //Shared code for in case of error (EOF or default)
-        SkipUntil(LF);
+        SkipLine();
         return;
     }
 
 
     private void TokenizeBool()
+    //NOTE: come back here for optimization. branch false may double check for no reason!
     {
         if (Reader.Peek() is 't')
         {
@@ -323,14 +358,22 @@ public ref struct TOMLTokenizer
         Span<char> bufferT = stackalloc char[4];
 
         if (Reader.ReadBlock(bufferT) is not 4 || bufferT is not "true")
-        {   
+        {
             string invalidResult = bufferT.ToString();
 
-            if (string.Equals(invalidResult, "false", StringComparison.OrdinalIgnoreCase))
-                ErrorLog.Add($"{Reader.Position}: Found Boolean 'true' with invalid casing: '{invalidResult}'");
+            if (string.Equals(invalidResult, "true", StringComparison.OrdinalIgnoreCase))
+                Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                               "Boolean literals must be lowercase.",
+                               ErrorSeverity.Error,
+                               ErrorDomain.Tokenizer));
 
-            ErrorLog.Add($"{Reader.Position}: Expected Boolean literal 'true' but got '{invalidResult}'");
-            SkipUntil(LF);
+            else
+                Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                               $"Expected Boolean literal 'true'. Found: '{invalidResult}'",
+                               ErrorSeverity.Error,
+                               ErrorDomain.Tokenizer));
+
+            SkipLine();
             return false;
         }
 
@@ -342,15 +385,22 @@ public ref struct TOMLTokenizer
     {
         Span<char> bufferF = stackalloc char[5];
         if (Reader.ReadBlock(bufferF) is not 5 || bufferF is not "false")
-        {   
+        {
             string invalidResult = bufferF.ToString();
+
             if (string.Equals(invalidResult, "false", StringComparison.OrdinalIgnoreCase))
-                ErrorLog.Add($"{Reader.Position}: Found Boolean 'false' with invalid casing: '{invalidResult}'");
+                Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                               "Boolean literals must be lowercase.",
+                               ErrorSeverity.Error,
+                               ErrorDomain.Tokenizer));
 
             else
-                ErrorLog.Add($"{Reader.Position}: Expected Boolean literal 'false' but got '{invalidResult}'");
+                Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                               $"Expected Boolean literal 'false'. Found: '{invalidResult}'",
+                               ErrorSeverity.Error,
+                               ErrorDomain.Tokenizer));
 
-            SkipUntil(LF);
+            SkipLine();
             return false;
         }
 
@@ -368,8 +418,12 @@ public ref struct TOMLTokenizer
 
         if (!Reader.MatchNextSkip(KeyValueSeparator))
         {
-            ErrorLog.Add($"{Reader.Position}: Expected separator '=' after key, but found '{GetFriendlyNameFor(Reader.Peek())}' instead.");
-            SkipUntil(LF);
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                           $"Expected separator '=' after key, but found '{GetFriendlyNameFor(Reader.Peek())}'",
+                           ErrorSeverity.Error,
+                           ErrorDomain.Tokenizer));
+
+            SkipLine();
         }
 
 
@@ -393,7 +447,11 @@ public ref struct TOMLTokenizer
 
         if (Reader.Peek() is EOF)
         {
-            ErrorLog.Add($"{Reader.Position}: Expected key but the end of file was reached");
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                          "Expected a key, but the end of file was reached.",
+                          ErrorSeverity.Error,
+                          ErrorDomain.Tokenizer));
+
             return;
         }
 
@@ -407,7 +465,6 @@ public ref struct TOMLTokenizer
         
            This makes enforcing the no-redeclaration rule for tables and arraytables easier in the parser.
         */
-
         while (true)
         {
             TokenizeKeyFragment();
@@ -420,7 +477,7 @@ public ref struct TOMLTokenizer
                 break;
             }
 
-            TokenStream.Enqueue(new(keyType is TomlTokenType.Key ? 
+            TokenStream.Enqueue(new(keyType is TomlTokenType.Key ?
                                                TomlTokenType.ImplicitKeyValueTable :             //these implicit tables cannot ever be redeclared (to avoid injection).
                                                TomlTokenType.ImplicitHeaderTable, _valueIndex)); //tables and arraytable implicit tables. These implicit tables can be redeclared (once).
         }
@@ -438,7 +495,11 @@ public ref struct TOMLTokenizer
 
         if (peekResult is Dot)
         {
-            ErrorLog.Add($"{Reader.Position}: Empty key fragment in dotted key");
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                "Missing key in dotted key (possible typo '..').",
+                ErrorSeverity.Error,
+                ErrorDomain.Tokenizer));
+
             return;
         }
 
@@ -481,7 +542,7 @@ public ref struct TOMLTokenizer
         while ((peekResult = Reader.Peek()) is not EOF && IsBareKey((char)peekResult))
         {
             //if (!IsBareKey((char)peekResult))
-              //  break;
+            //  break;
 
             _builder.Append((char)Reader.Read());
         }
@@ -499,8 +560,8 @@ public ref struct TOMLTokenizer
 
     #region Collection Types
 
-    /*Tables are the base of all TOML files so this is almost always hot. Only 1 callsite in a 
-      relatively small method, definitely inline if is possible. */
+    /*Tables are the core of all TOML files so this is almost always hot. Only 1 callsite in a 
+      relatively small method, definitely inline if possible. */
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void TokenizeTable()
     {
@@ -514,12 +575,16 @@ public ref struct TOMLTokenizer
             TokenizeArrayTable();
             return;
         }
-       
+
 
         if (Reader.Peek() is SquareClose)
         {
-            ErrorLog.Add($"{Reader.Position}: Empty table declaration.");
-            SkipUntil(LF);
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                "Table headers cannot be empty.",
+                ErrorSeverity.Error,
+                ErrorDomain.Tokenizer));
+
+            SkipLine();
             return;
         }
 
@@ -533,8 +598,12 @@ public ref struct TOMLTokenizer
         //Assert that the table declaration is terminated, log error then sync if not.
         if (!Reader.MatchNextSkip(SquareClose))
         {
-            ErrorLog.Add($"{Reader.Position}: Unterminated table declaration.");
-            SkipUntil(LF);
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                "Table declaration is missing closing ']'.",
+                ErrorSeverity.Error,
+                ErrorDomain.Tokenizer));
+
+            SkipLine();
             return;
         }
     }
@@ -548,8 +617,12 @@ public ref struct TOMLTokenizer
 
         if (Reader.PeekSkip() is SquareClose)
         {
-            ErrorLog.Add($"{Reader.Position}: Empty arraytable declaration.");
-            SkipUntil(LF);
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                "Arraytable headers cannot be empty.",
+                ErrorSeverity.Error,
+                ErrorDomain.Tokenizer));
+
+            SkipLine();
             return;
         }
 
@@ -563,8 +636,12 @@ public ref struct TOMLTokenizer
 
         if (!(Reader.MatchNextSkip(SquareClose) && Reader.MatchNext(SquareClose)))
         {
-            ErrorLog.Add($"{Reader.Position}: Unterminated arraytable declaration.");
-            SkipUntil(LF);
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                "Arraytable declaration is missing closing ']]'.",
+                ErrorSeverity.Error,
+                ErrorDomain.Tokenizer));
+
+            SkipLine();
             return;
         }
     }
@@ -590,8 +667,6 @@ public ref struct TOMLTokenizer
                 break;
 
             TokenizeValue();
-
-
             SkipWhiteSpaceAndComments();
 
             if (!Reader.MatchNext(Comma) || Reader.Peek() is EOF) //Failsafe against infinite loop in the case of bad array syntax.
@@ -602,8 +677,11 @@ public ref struct TOMLTokenizer
 
         if (!Reader.MatchNext(SquareClose))
         {
-            ErrorLog.Add($"{Reader.Position}: Unterminated array");
-            SkipUntil(LF);
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                "Array is missing closing ']'.",
+                ErrorSeverity.Error,
+                ErrorDomain.Tokenizer));
+            SkipLine();
         }
 
         else
@@ -629,7 +707,6 @@ public ref struct TOMLTokenizer
         Debug.Assert(Reader.Peek() is CurlyOpen, "Incorrect usage, { was already consumed.");
         _ = Reader.Read();
 
-        //Console.WriteLine("previous token: " + Values[^1]);
 
 
         TokenStream.Enqueue(new(TomlTokenType.InlineTableStart));
@@ -647,9 +724,13 @@ public ref struct TOMLTokenizer
 
         if (Reader.Peek() is Comma)
         {
-            ErrorLog.Add($"{Reader.Position}: Empty inline tables cannot contain separators.");
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+               "Empty inline tables cannot contain commas.",
+               ErrorSeverity.Error,
+               ErrorDomain.Tokenizer));
+
             TokenStream.Enqueue(new(TomlTokenType.InlineTableEnd));
-            SkipUntil(LF);
+            SkipLine();
             return;
         }
 
@@ -658,9 +739,13 @@ public ref struct TOMLTokenizer
         {
             if (Reader.PeekSkip() is CurlyClose)
             {
-                ErrorLog.Add($"{Reader.Position}: Inline tables cannot contain trailing commas.");
+                Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                            "Inline tables cannot contain trailing commas.",
+                            ErrorSeverity.Error,
+                            ErrorDomain.Tokenizer));
+
                 TokenStream.Enqueue(new(TomlTokenType.InlineTableEnd));
-                SkipUntil(LF);
+                SkipLine();
                 return;
             }
 
@@ -674,12 +759,19 @@ public ref struct TOMLTokenizer
 
 
         else if (Reader.MatchLineEnding())
-            ErrorLog.Add($"{Reader.Position}: Inline tables must appear on a single line.");
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                "Inline tables must appear on a single line.",
+                ErrorSeverity.Error,
+                ErrorDomain.Tokenizer));
 
         else
         {
-            ErrorLog.Add($"{Reader.Position}: Expected '}}' to terminate inline table, but found {GetFriendlyNameFor(Reader.Peek())}.");
-            SkipUntil(LF);
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+              $"Expected '}}' to terminate inline table, but found '{GetFriendlyNameFor(Reader.Peek())}'",
+              ErrorSeverity.Error,
+              ErrorDomain.Tokenizer));
+
+            SkipLine();
         }
     }
 
@@ -716,9 +808,11 @@ public ref struct TOMLTokenizer
                 return;
 
             default: //Not possible, at least 1 quote exists if this method was called.
-                Debug.Fail("Usage error; unexpected state, no case matched the count of quotes.");
-                ErrorLog.Add($"{Reader.Position}: Invalid number of opening doublequotes in basic string.");
-                SkipUntil(LF);
+                Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                    "Invalid number of opening quotes in string.",
+                    ErrorSeverity.Fatal, ErrorDomain.Internal));
+
+                SkipLine();
                 return;
         }
     }
@@ -751,9 +845,11 @@ public ref struct TOMLTokenizer
                 return;
 
             default: //Not possible, at least 1 quote exists if this method was called.
-                Debug.Fail("Usage error; unexpected state, no case matched the count of quotes.");
-                ErrorLog.Add($"{Reader.Position}: Invalid number of opening singlequotes in literal string.");
-                SkipUntil(LF);
+                Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                    "Invalid number of opening quotes in string.",
+                    ErrorSeverity.Fatal, ErrorDomain.Internal)); SkipLine();
+
+                SkipLine();
                 return;
         }
     }
@@ -767,15 +863,21 @@ public ref struct TOMLTokenizer
             switch (c)
             {
                 case LF:
-                    ErrorLog.Add($"{Reader.Position}: Basic strings cannot span multiple lines.");
-                    SkipUntil(LF);
+                    Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                        "Only multiline strings can span multiple lines.",
+                        ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
+                    SkipLine();
                     return;
 
                 case Backslash:
                     if (Reader.Peek() is Space)
                     {
-                        ErrorLog.Add($"{Reader.Position}: Only multiline strings can contain line ending backslashes.");
-                        SkipUntil(LF);
+                        Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                            "Unescaped backslash in string.",
+                            ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
+                        SkipLine();
                         return;
                     }
 
@@ -783,7 +885,10 @@ public ref struct TOMLTokenizer
                     break;
 
                 case not Tab when IsControl((char)c):
-                    ErrorLog.Add($"{Reader.Position}: Found unescaped control character {GetFriendlyNameFor(c)} in basic string. Control characters other than Tab (U+0009) must be escaped.");
+                    Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                     $"Invalid control character '{GetFriendlyNameFor(c)}' in string.",
+                     ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
                     break;
 
                 default:
@@ -794,8 +899,11 @@ public ref struct TOMLTokenizer
 
         if (c is not DoubleQuote)
         {
-            ErrorLog.Add($"{Reader.Position}: Unterminated string");
-            SkipUntil(LF);
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                "Unterminated string.",
+                ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
+            SkipLine();
             return;
         }
 
@@ -821,7 +929,7 @@ public ref struct TOMLTokenizer
                         return;
                     continue;
 
-                case CR when Reader.MatchNext(LF): //Currently normalizes to LF line endings.
+                case CR when Reader.MatchNext(LF): //Currently CRLF is normalized to LF line endings.
                     _builder.Append(LF);
                     break;
 
@@ -847,9 +955,11 @@ public ref struct TOMLTokenizer
 
                         else //unescaped backslash not last non-wp char, syntax error.
                         {
-                            ErrorLog.Add($"{Reader.Position}: Found unescaped '\\' in multiline basic string. Only tab, line feed and carriage return are allowed unescaped. " +
-                                               $"If this is a line-ending backslash, make sure it is the last non-whitespace character on the line.");
-                            SkipUntil(LF);
+                            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                                "Unescaped, non-line-ending backslash in multiline string.",
+                                ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
+                            SkipLine();
                             break;
                         }
                     }
@@ -859,8 +969,11 @@ public ref struct TOMLTokenizer
                     break;
 
                 case not (Tab or LF) when IsControl((char)c):
-                    ErrorLog.Add($"{Reader.Position}: Found control character {GetFriendlyNameFor(c)} in multiline basic string. Only tab, line feed and carriage return are allowed unescaped.");
-                    SkipUntil(LF);
+                    Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                        $"Invalid control character '{GetFriendlyNameFor(c)}' in multiline string.",
+                        ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
+                    SkipLine();
                     break;
 
                 default:
@@ -869,8 +982,10 @@ public ref struct TOMLTokenizer
             }
         }
 
-        ErrorLog.Add($"{Reader.Position}: Unterminated string");
-        SkipUntil(LF);
+        Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+            "Unterminated multiline string.",
+            ErrorSeverity.Error, ErrorDomain.Tokenizer));
+        SkipLine();
         return;
     }
 
@@ -884,13 +999,19 @@ public ref struct TOMLTokenizer
             {
                 case LF:
                 case CR when Reader.Peek() is LF:
-                    ErrorLog.Add($"{Reader.Position}: Literal strings cannot span multiple lines.");
-                    SkipUntil(LF);
+                    Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                        "Only multiline strings can span multiple lines.",
+                        ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
+                    SkipLine();
                     break;
 
                 case not Tab when IsControl((char)c):
-                    ErrorLog.Add($"{Reader.Position}: Found control character {GetFriendlyNameFor(c)} in literal string. Only tab is allowed unescaped.");
-                    SkipUntil(LF);
+                    Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                        $"Invalid control character '{GetFriendlyNameFor(c)}' in literal string.",
+                        ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
+                    SkipLine();
                     break;
 
                 default:
@@ -902,8 +1023,10 @@ public ref struct TOMLTokenizer
 
         if (c is not SingleQuote)
         {
-            ErrorLog.Add($"{Reader.Position}: Unterminated literal string");
-            SkipUntil(LF);
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                "Unterminated literal string.",
+                ErrorSeverity.Error, ErrorDomain.Tokenizer));
+            SkipLine();
             return;
         }
 
@@ -932,7 +1055,9 @@ public ref struct TOMLTokenizer
                     break;
 
                 case not (Tab or LF) when IsControl((char)c):
-                    ErrorLog.Add($"{Reader.Position}: Found control character {GetFriendlyNameFor(c)} in multiline literal string. Only tab is allowed unescaped.");
+                    Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                        $"Invalid control character {GetFriendlyNameFor(c)} in multiline literal string.",
+                        ErrorSeverity.Error, ErrorDomain.Tokenizer));
                     break;
 
                 default:
@@ -941,8 +1066,11 @@ public ref struct TOMLTokenizer
             }
         }
 
-        ErrorLog.Add($"{Reader.Position}: Unterminated string");
-        SkipUntil(LF);
+        Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+            "Unterminated multiline literal string.",
+            ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
+        SkipLine();
         return;
     }
 
@@ -967,8 +1095,11 @@ public ref struct TOMLTokenizer
                 break;
 
             default:
-                ErrorLog.Add($"{Reader.Position}: Too many separators ({separator}) in multiline string.");
-                SkipUntil(LF);
+                Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                    "Trailing quotes in multiline string.",
+                    ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
+                SkipLine();
                 break;
         }
 
@@ -990,8 +1121,8 @@ public ref struct TOMLTokenizer
         if (c is EOF)
             return;
 
-        bool? hasSign = c is '-' ? true : 
-                        c is '+' ? false : 
+        bool? hasSign = c is '-' ? true :
+                        c is '+' ? false :
                         null; //no sign
 
 
@@ -1009,13 +1140,14 @@ public ref struct TOMLTokenizer
                 //small optimization, we can easily decide the type right here with a single branch,
                 //then defer the error handling and reporting to the respective method.
 
-                _builder.Append('0'); //previous char was 0
-                _builder.Append((char)Reader.Read()); //current char is a digit too
+                //Append previous and current char to buffer.
+                _builder.Append('0');
+                _builder.Append((char)Reader.Read());
+
 
                 if (Reader.Peek() is Semicolon)
                 {
-                  //MODIFIED  var timeonly = TokenizeTimeOnly(_builder.RawChars[..Time_HourSeparator]); //also pass already buffered hours
-                    var timeonly = TokenizeTimeOnly(_builder.RawChars.Slice(0, Time_HourSeparator));   
+                    var timeonly = TokenizeTimeOnly(_builder.RawChars.Slice(0, Time_HourSeparator));
                     AddObject(new TTimeOnly(timeonly));
                     TokenStream.Enqueue(new(TomlTokenType.TimeStamp, _valueIndex));
                 }
@@ -1026,9 +1158,8 @@ public ref struct TOMLTokenizer
                     _builder.Append((char)Reader.Read());
                     _builder.Append((char)Reader.Read());
                     TokenizeDateOrDateTime();
-                    //this will return 0xFFFF if eof, but tryparseexact will fail on that so its handled.
-                    //its a datetime, and the year is already in buffered.
                 }
+
                 return;
             }
 
@@ -1038,51 +1169,58 @@ public ref struct TOMLTokenizer
                 case 'x' or 'b' or 'o':
                     if (hasSign is not null)
                     {
-                        ErrorLog.Add($"Prefixed numbers cannot have signs. (Line {Reader.Line} Column {Reader.Column - 2})"); //subtract for 0 and prefix char to get sign position.
-                        SkipUntil(LF);
+                        Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column - 2,
+                            "Prefixed numbers cannot be signed.",
+                             ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
                         return;
                     }
 
-#pragma warning disable CS8509 //Impossible, the switch case already matched against x,b,o
-                    var formatType = c switch
-                    {
-                        'x' => Hex,
-                        'b' => Binary,
-                        'o' => Octal,
-                    };
-#pragma warning restore CS8509
+                    var formatType = GetFormatFor((char)c);
                     _ = Reader.Read(); //Consume prefix char.
+
 
                     if (Reader.Peek() is Underscore)
                     {
-                        ErrorLog.Add($"Syntax error: Found unit separator '_'  between a {formatType} number's first digit and its prefix. {Reader.Position}");
-                        SkipUntil(LF);
+                        Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                            "Unit separator '_' cannot appear between a prefixed number's prefix and first digit.",
+                             ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
+                        SkipLine();
+
                         return;
                     }
 
 
                     ResolvePrefixedInteger(formatType);
+
                     AddObject(new TInteger(_builder.AsSpan(), formatType));
                     TokenStream.Enqueue(new(TomlTokenType.Integer, _valueIndex));
+
                     return;
 
                 case '.':
                     if (hasSign is not null)
                         _builder.Append(hasSign is true ? '-' : '+');
+
                     _builder.Append('0');
                     break;
 
                 case 'e' or 'E':
                     _builder.Append('0');
                     _ = Reader.Read();
+
                     TokenizeFloatExponent();
+
                     AddObject(new TFloat(_builder.AsSpan()));
                     TokenStream.Enqueue(new(TomlTokenType.Float, _valueIndex));
+
                     return;
 
                 default:
                     AddObject(new TInteger(0, TomlTokenMetadata.Decimal));
                     TokenStream.Enqueue(new(TomlTokenType.Integer, _valueIndex));
+
                     return;
             }
         }
@@ -1114,8 +1252,11 @@ public ref struct TOMLTokenizer
         {
             if (!Reader.MatchNext('n') || !Reader.MatchNext('f'))
             {
-                ErrorLog.Add($"{Reader.Position}: Expected literal 'inf'.");
-                SkipUntil(LF);
+                Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                         "Expected literal 'inf'.",
+                          ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
+                SkipLine();
             }
 
             else
@@ -1137,19 +1278,20 @@ public ref struct TOMLTokenizer
         {
             if (!Reader.MatchNext('a') || !Reader.MatchNext('n'))
             {
-                ErrorLog.Add($"{Reader.Position}: Expected the literal 'nan', but some characters are missing or invalid.");
-                SkipUntil(LF);
-            }
+                Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                     "Expected literal 'nan'.",
+                      ErrorSeverity.Error, ErrorDomain.Tokenizer));
 
-            //could add a warning or info that the sign of a nan value will not be preserved.
+                SkipLine();
+            }
 
             else
             {
                 var metadata = hasSign switch
                 {
                     null => Nan,
-                    true => NegativeNan,
                     false => PositiveNan,
+                    true => NegativeNan
                 };
 
                 AddObject(new TFloat(double.NaN, metadata));
@@ -1184,14 +1326,12 @@ public ref struct TOMLTokenizer
         }
 
 
-        //This will never be inlined regardless of IL size limit (afaik),
-        //because inlining is not supported for anything other than basic if/then/else.
         static TomlTokenMetadata GetFormatFor(char c) => c switch
         {
             'x' => Hex,
             'b' => Binary,
             'o' => Octal,
-            _ => throw new TomlInternalException($"Invalid format character {c} provided to {nameof(GetFormatFor)}"),
+            _ => throw new TomlInternalException(new("Invalid format specifier provided.", ErrorSeverity.Fatal, ErrorDomain.Internal))
         };
     }
 
@@ -1208,10 +1348,10 @@ public ref struct TOMLTokenizer
 
         delegate*<int, bool> isDigit = format switch
         {
-            Hex    => &IsHexadecimalDigit,
+            Hex => &IsHexadecimalDigit,
             Binary => &IsBinaryDigit,
-            Octal  => &IsOctalDigit,
-            _ => throw new TomlInternalException($"Invalid format specifier '{format}' provided to [{nameof(ResolvePrefixedInteger)}]")
+            Octal => &IsOctalDigit,
+            _ => throw new TomlInternalException(new("Invalid format specifier provided.", ErrorSeverity.Fatal, ErrorDomain.Internal))
         };
 
 
@@ -1221,8 +1361,11 @@ public ref struct TOMLTokenizer
             {
                 if (!previousWasDigit)
                 {
-                    ErrorLog.Add($"{Reader.Position}: Underscores in numbers must have digits on both sides.");
-                    SkipUntil(LF);
+                    Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                    "Underscores in numbers must have digits on both sides.",
+                     ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
+                    SkipLine();
                     return;
                 }
 
@@ -1238,19 +1381,24 @@ public ref struct TOMLTokenizer
 
         if (!previousWasDigit)
         {
-            ErrorLog.Add($"{Reader.Position} Numbers cannot end on an underscore.");
-            SkipUntil(LF);
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                "Numbers cannot end on an underscore.",
+                ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
+            SkipLine();
             return;
         }
 
 
         if (_builder.AsSpan().Length is 0)
         {
-            ErrorLog.Add($"{Reader.Position}: Invalid integer.");
-            SkipUntil(LF);
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                "Invalid integer.",
+                ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
+            SkipLine();
             return;
         }
-
 
 
         static bool IsOctalDigit(int c) => c is not EOF && (uint)(c - '0') <= ('7' - '0');
@@ -1258,6 +1406,7 @@ public ref struct TOMLTokenizer
         static bool IsHexadecimalDigit(int c) => c is not EOF && IsAsciiHexDigit((char)c);
     }
 
+    //bool param: indicates if promotion is a possibility
     //bool return: if true, there was a succesful promotion; otherwise it's an integer.
     private bool TokenizeDecimalInteger(bool canPromote)
     {
@@ -1280,8 +1429,11 @@ public ref struct TOMLTokenizer
 
                 if (!previousWasDigit)
                 {
-                    ErrorLog.Add("Underscores in numbers must have digits on both sides.");
-                    SkipUntil(LF);
+                    Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                         "Underscores in numbers must have digits on both sides.",
+                         ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
+                    SkipLine();
                     return true;
                 }
 
@@ -1308,8 +1460,11 @@ public ref struct TOMLTokenizer
 
         if (!previousWasDigit)
         {
-            ErrorLog.Add("Numbers cannot end on an underscore.");
-            SkipUntil(LF);
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                "Numbers cannot end on an underscore.",
+                ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
+            SkipLine();
         }
 
 
@@ -1322,8 +1477,11 @@ public ref struct TOMLTokenizer
         {
             if (_builder.Length is not 4)
             {
-                ErrorLog.Add("RFC3339 timestamps can only represent years between 0 and 9999, and must be exactly 4 digits long.");
-                SkipUntil(LF);
+                Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                    "Years in RFC-3339 timestamps must consist of 4 digits, in the range [0000 - 9999].",
+                    ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
+                SkipLine();
                 return;
             }
 
@@ -1332,8 +1490,11 @@ public ref struct TOMLTokenizer
 
         else
         {
-            ErrorLog.Add("Invalid position of '-' in number.");
-            SkipUntil(LF);
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                "Invalid usage of '-' in number or timestamp.",
+                ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
+            SkipLine();
             return;
         }
     }
@@ -1344,21 +1505,27 @@ public ref struct TOMLTokenizer
         {
             if (_builder.Length is not 2)
             {
-                ErrorLog.Add("RFC3339 timestamps can only represent hours between 0 and 23, and must be exactly 2 digits long.");
-                SkipUntil(LF);
+                Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                    "Hours in RFC-3339 timestamps must consist of 2 digits, in the range [00 - 23]",
+                    ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
+                SkipLine();
                 return;
             }
 
             var timeonly = TokenizeTimeOnly(_builder.RawChars.Slice(0, Time_HourSeparator));
-            //var timeonly = TokenizeTimeOnly(_builder.RawChars[..Time_HourSeparator]);
+            
             AddObject(new TTimeOnly(timeonly));
             TokenStream.Enqueue(new(TomlTokenType.TimeStamp, _valueIndex));
         }
 
         else
         {
-            ErrorLog.Add("Invalid position of ':' in number. Make sure the hours in your timestamps are exactly 2 digits long.");
-            SkipUntil(LF);
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                "Invalid usage of ':' in timestamp.",
+                ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
+            SkipLine();
             return;
         }
     }
@@ -1373,15 +1540,21 @@ public ref struct TOMLTokenizer
 
         if (peekResult is EOF)
         {
-            ErrorLog.Add($"{Reader.Position}: Expected an exponent, but the end of the file was reached.");
-            SkipUntil(LF);
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                "Expected an exponent, but the end of the file was reached.",
+                ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
+            SkipLine();
             return;
         }
 
         if (peekResult is Underscore)
         {
-            ErrorLog.Add($"{Reader.Position}: Unit separators are not allowed between an exponent character and its first digit.");
-            SkipUntil(LF);
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                "Underscores are not allowed on either side of an exponent character.",
+                ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
+            SkipLine();
             return;
         }
 
@@ -1402,16 +1575,22 @@ public ref struct TOMLTokenizer
 
         if (peekResult is EOF)
         {
-            ErrorLog.Add($"{Reader.Position}: Expected the fractional part of a number, but the end of the file was reached.");
-            SkipUntil(LF);
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                "Expected the fractional part of a number, but the end of the file was reached.",
+                ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
+            SkipLine();
             return;
         }
 
 
         if (!IsAsciiDigit((char)peekResult))
         {
-            ErrorLog.Add($"{Reader.Position}: Decimal points must have digits on both sides.");
-            SkipUntil(LF);
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                "Decimal points must have digits on both sides.",
+                ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
+            SkipLine();
             return;
         }
 
@@ -1433,63 +1612,96 @@ public ref struct TOMLTokenizer
         TomlTokenMetadata metadata = None;
         Span<char> buffer = stackalloc char[5];
 
-        int tmp = 0;
-
-        if ((tmp = Reader.ReadBlock(buffer)) is not 5)
+        if (Reader.ReadBlock(buffer) is not 5)
         {
-            ErrorLog.Add($"{Reader.Position}: Invalid date format.");
-            SkipUntil(LF);
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                "Incomplete timestamp.",
+                ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
+            SkipLine();
             return;
         }
 
-        if (!System.DateOnly.TryParseExact(buffer, "MM-dd", out var date))
+        if (!MatchDateDayMonth(buffer, out int month, out int day))
         {
-            ErrorLog.Add($"{Reader.Position}: Invalid month and/or day.");
-            SkipUntil(LF);
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                "Invalid month and/or day.",
+                ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
+            SkipLine();
             return;
         }
 
         try
-        {           //RawChars[..4]
-            date = new(int.Parse(_builder.RawChars.Slice(0,4), CultureInfo.InvariantCulture), date.Month, date.Day);
+        {   
+            DateOnly date = new(int.Parse(_builder.RawChars.Slice(0, 4), CultureInfo.InvariantCulture), month, day);
+           
+            int peekResult = Reader.Peek();
+
+            if (MatchDateTimeSeparator(peekResult))
+            {
+                var time = TokenizeTimeOnly(Span<char>.Empty);
+                
+                /*If no offset is provided, it will be TimeSpan.Zero. Since UTC is also zero, ambiguity could arise between
+                  a datetime with an offset of UTC, and a datetime with no offset, which is why the metadata is used to decide that.*/
+                var offset = TokenizeTimeOffset(ref metadata);
+
+
+                if (metadata is TomlTokenMetadata.Local)
+                    AddObject(new TDateTime(new(date, time, DateTimeKind.Local)));
+
+                else
+                    AddObject(new TDateTimeOffset(new(date, time, offset), metadata));
+
+                TokenStream.Enqueue(new(TomlTokenType.TimeStamp, _valueIndex));
+            }
+
+            else
+            {
+                AddObject(new TDateOnly(date));
+                TokenStream.Enqueue(new(TomlTokenType.TimeStamp, _valueIndex));
+
+                return;
+            }
         }
 
         catch (ArgumentOutOfRangeException)
         {
-            ErrorLog.Add($"{Reader.Position}: File contains an invalid date. Year: {_builder.RawChars.Slice(0,4)} Month: {date.Month} Day: {date.Day}");
-            SkipUntil(LF);
-            return;
-        }
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                    $"Invalid date '{_builder.RawChars.Slice(0, 4)}-{month}-{day}'",
+                    ErrorSeverity.Error, ErrorDomain.Tokenizer));
 
-        int peekResult = Reader.Peek();
-
-        if (MatchDateTimeSeparator(peekResult))
-        {
-            var time = TokenizeTimeOnly(Span<char>.Empty);
-
-            /*If no offset is provided, it will be TimeSpan.Zero. Since UTC is also zero, ambiguity could arise between
-              a datetime with an offset of UTC, and a datetime with no offset, which is why the metadata is used to decide that.*/
-            var offset = TokenizeTimeOffset(ref metadata);
-
-
-            if (metadata is TomlTokenMetadata.Local)
-                AddObject(new TDateTime(new(date, time, DateTimeKind.Local)));
-
-            else
-                AddObject(new TDateTimeOffset(new(date, time, offset), metadata));
-
-
-            TokenStream.Enqueue(new(TomlTokenType.TimeStamp, _valueIndex));
-        }
-
-        else
-        {
-            AddObject(new TDateOnly(date));
-            TokenStream.Enqueue(new(TomlTokenType.TimeStamp, _valueIndex));
-
+            SkipLine();
             return;
         }
     }
+
+    //Validates "MM-dd".
+    //No actual date related checks, because of an upstream call to TryParse.
+    readonly bool MatchDateDayMonth(in ReadOnlySpan<char> buffer, out int month, out int day)
+    {
+        month = default;
+        day = default;
+        if (buffer.Length != 5 || buffer[2] != '-')
+            return false;
+        
+        bool allDigits = (uint)(buffer[0] - '0') <= ('9' - '0') &&
+                         (uint)(buffer[1] - '0') <= ('9' - '0') &&
+                         (uint)(buffer[3] - '0') <= ('9' - '0') &&
+                         (uint)(buffer[4] - '0') <= ('9' - '0');
+
+        if (!allDigits)
+            return false;
+
+        month = 10 * (buffer[0] - AsciiNumOffset) + (buffer[1] - AsciiNumOffset);
+        day   = 10 * (buffer[3] - AsciiNumOffset) + (buffer[4] - AsciiNumOffset);
+
+
+        //Make sure month is [1..12] and day is [1..month_max].
+        return (uint)(month - 1) < 12 &&
+               (uint)day <= stackalloc byte[12] { 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 }[month - 1];
+    }
+
 
     readonly bool MatchDateTimeSeparator(int c)
     {
@@ -1516,7 +1728,10 @@ public ref struct TOMLTokenizer
         {
             if (!Reader.TryRead(out char h1) || !Reader.TryRead(out char h2))
             {
-                ErrorLog.Add($"{Reader.Position}: Invalid hour component");
+                Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                    "Invalid hour component",
+                    ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
                 goto ReturnError;
             }
 
@@ -1533,7 +1748,10 @@ public ref struct TOMLTokenizer
 
         if (!Reader.MatchNext(Semicolon))
         {
-            ErrorLog.Add($"{Reader.Position}: Expected separator ':' between hours and minutes in timestamp.");
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                "Expected semicolon to separate hours and minutes in timestamp.",
+                ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
             goto ReturnError;
         }
 
@@ -1550,7 +1768,10 @@ public ref struct TOMLTokenizer
             {
                 if (i is not Time_MinSeparator)
                 {
-                    ErrorLog.Add($"{Reader.Position}: Expected separator ':' between minutes and seconds in timestamp.");
+                    Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                        "Expected semicolon to separate minutes and seconds in timestamp.",
+                        ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
                     goto ReturnError;
                 }
                 else
@@ -1559,7 +1780,10 @@ public ref struct TOMLTokenizer
 
             else if ((uint)(readResult - '0') > ('9' - '0'))
             {
-                ErrorLog.Add($"{Reader.Position}: Unexpected character '{GetFriendlyNameFor(readResult)}'. Local times may only consist of digits between 0 and 9.");
+                Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                        $"Unexpected character '{GetFriendlyNameFor(readResult)}' in time of day.",
+                        ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
                 goto ReturnError;
             }
 
@@ -1573,18 +1797,18 @@ public ref struct TOMLTokenizer
           of the individual components in a timestamp (see checks below).
           
           The reason we still calculate the result in ticks afterwards, instead of calling eg. the 
-          ctor TimeSpan(int hour,int min, int sec), is fractional seconds. 
+          ctor TimeSpan(int hour, int min, int sec), is fractional seconds. 
           
           Right now, they are supported up to 7 digits, at a 100-nanosecond resolution, which is 
           the .NET DateTime max. However, since no ctor actually has nanoseconds as a parameter, apart 
           from directly constructing from ticks, we stay with ticks apart from validation.
            
-          The calculations for hour,minute and second do make the tick calculation a bit cleaner though.
+          The calculations for hour, minute and second do make the tick calculation a bit cleaner though.
           That, and the ctor using ticks is short, with only one comparison. There's also a ctor without
           the check using a direct assignment, but it's internal, so no dice.
         */
 
-        int hour   = (buffer[Time_H1] - AsciiNumOffset) * 10 + (buffer[Time_H2] - AsciiNumOffset);
+        int hour = (buffer[Time_H1] - AsciiNumOffset) * 10 + (buffer[Time_H2] - AsciiNumOffset);
         int minute = (buffer[Time_M1] - AsciiNumOffset) * 10 + (buffer[Time_M2] - AsciiNumOffset);
         int second = (buffer[Time_S1] - AsciiNumOffset) * 10 + (buffer[Time_S2] - AsciiNumOffset);
 
@@ -1592,18 +1816,15 @@ public ref struct TOMLTokenizer
         //There's a problem with this implementation. Only an UTC end of month may have a leap second.
         //This is not checked, because leap seconds are truncated, which in turn is because of DateTime not supporting it.
         //A parser should optimize for the common case, and since leap seconds are on the verge of being
-        //obsoleted by lobbying from big tech, I don't feel like wasting more branches on this would be very beneficial.
-        if (second is 60)
-        {
-#if DISALLOW_LEAP_SEC
-            ErrorLog.Value.Add($"{Reader.Position}: Leap seconds are disallowed in the parser's current configuration.");
-#endif
-            --second;
-        }
+        //obsoleted by lobbying from big tech, I don't feel like wasting more branches on this.
+        second = second == 60 ? 59 : second;
 
         if ((uint)hour > 23 || (uint)minute > 59 || (uint)second > 59)
         {
-            ErrorLog.Add($"{Reader.Position}: Invalid timestamp '{hour}:{minute}:{second}'.");
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                $"Invalid time '{hour}:{minute}:{second}'.",
+                ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
             goto ReturnError;
         }
 
@@ -1619,7 +1840,10 @@ public ref struct TOMLTokenizer
 
         if (resultInTicks > TimeSpan.TicksPerDay - 1) //Avoid throw from .NET ctor and report as tokenizer error instead.
         {
-            ErrorLog.Add($"{Reader.Position}: Invalid local time; represented value is greater than 23:59:59.");
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                "Invalid time; value out of range.",
+                ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
             goto ReturnError;
         }
 
@@ -1629,7 +1853,7 @@ public ref struct TOMLTokenizer
         return result;
 
     ReturnError:
-        SkipUntil(LF);
+        SkipLine();
         return System.TimeOnly.MinValue;
     }
 
@@ -1644,20 +1868,25 @@ public ref struct TOMLTokenizer
                 Reader.Read();
                 return result;
 
-            case '-':
-            case '+':
+            case '+' or '-':
                 Span<char> buffer = stackalloc char[TimeOffset_Length]; //+XX:XX
                 if (Reader.ReadBlock(buffer) is not TimeOffset_Length)
                 {
-                    ErrorLog.Add($"{Reader.Position}: Invalid time offset format");
-                    SkipUntil(LF);
+                    Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                        "Invalid timezone offset format.",
+                        ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
+                    SkipLine();
                 }
 
                 //TryParse does not accept '+' for positive offsets. Negatives are handled fine.
                 if (!TimeSpan.TryParse(buffer[0] is '+' ? buffer.Slice(1) : buffer, out result))
                 {
-                    ErrorLog.Add($"{Reader.Position}: Invalid time offset");
-                    SkipUntil(LF);
+                    Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                        "Invalid timezone.",
+                        ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
+                    SkipLine();
                 }
                 break;
 
@@ -1686,13 +1915,16 @@ public ref struct TOMLTokenizer
 
         int peekResult;
 
-        for (; i < FracSec_MaxPrecisionDigits + 1 
-                   && (peekResult = Reader.Peek()) is not EOF 
-                   && IsAsciiDigit((char)peekResult); i++)
+        for (; i < FracSec_MaxPrecisionDigits + 1
+                   && (peekResult = Reader.Peek()) is not EOF
+                   && IsAsciiDigit((char)peekResult); 
+               i++)
         {
             if (i is FracSec_MaxPrecisionDigits)
             {
-                ErrorLog.Add($"Fractional seconds are only supported up to {FracSec_MaxPrecisionDigits} digit precision; value was truncated.");
+                Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                       "Fractional seconds are only supported up to 7 digits. Value was truncated.",
+                       ErrorSeverity.Warning, ErrorDomain.Tokenizer));
 
                 //Truncate any additional digits, as per spec
                 do
@@ -1710,7 +1942,9 @@ public ref struct TOMLTokenizer
 
         if (i is 0)
         {
-            ErrorLog.Add($"{Reader.Position}: Fractional second specifier '.' must be followed by at least one digit.");
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                "Fractional second delimiter '.' must be followed by at least one digit.",
+                ErrorSeverity.Error, ErrorDomain.Tokenizer));
             return 0;
         }
 
@@ -1743,9 +1977,6 @@ public ref struct TOMLTokenizer
         int result = initial switch
         {
             'b' => '\u0008',
-#if TOML_VER_1_1_0
-            'e' => '\u001B',
-#endif
             't' => '\u0009',
             'n' => '\u000A',
             'f' => '\u000C',
@@ -1757,8 +1988,10 @@ public ref struct TOMLTokenizer
 
         if (result is EOF)
         {
-            ErrorLog.Add($"{Reader.Position}: No escape sequence for character '{GetFriendlyNameFor(initial)}' (U+{initial:X8}).");
-            SkipUntil(LF);
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                $"No escape sequence exists for '{GetFriendlyNameFor(initial)}'.",
+                ErrorSeverity.Error, ErrorDomain.Tokenizer));
+            SkipLine();
             return;
         }
 
@@ -1774,7 +2007,9 @@ public ref struct TOMLTokenizer
 
         if (!IsUnicodeScalar(codePoint))
         {
-            ErrorLog.Add($"{Reader.Position}: Found non-scalar or out of range Unicode codepoint U+{codePoint:X8} in escape sequence. Only scalar values may be escaped.");
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                $"Non-scalar or out of range Unicode codepoint 'U+{codePoint:X8}' in escape sequence.",
+                ErrorSeverity.Error, ErrorDomain.Tokenizer));
             return;
         }
 
@@ -1802,7 +2037,10 @@ public ref struct TOMLTokenizer
 
         if (!IsUnicodeScalar(codePoint))
         {
-            ErrorLog.Add($"{Reader.Position}: Found non-scalar or out of range Unicode codepoint U+{codePoint:X4} in escape sequence. Only scalar values may be escaped.");
+            Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                 $"Non-scalar or out of range Unicode codepoint 'U+{codePoint:X4}' in escape sequence.",
+                 ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
             return;
         }
 
@@ -1823,12 +2061,16 @@ public ref struct TOMLTokenizer
         if (charsRead < digits) //Definitely not good...
         {
             if (buffer[charsRead - 1] is DoubleQuote or Null)
-                ErrorLog.Add($"{Reader.Position}: Escape sequence '{buffer.ToString()}' is missing {5 - charsRead} digit(s).");
+                Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                    $"Escape sequence '{buffer.ToString()}' is missing {5 - charsRead} digit(s).",
+                    ErrorSeverity.Error, ErrorDomain.Tokenizer));
 
             else
-                ErrorLog.Add($"{Reader.Position}: Escape sequence '{buffer.ToString()}' must consist of {digits} hexadecimal characters.");
+                Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                   $"Escape sequence '{buffer.ToString()}' must consist of {digits} hexadecimal digits.",
+                   ErrorSeverity.Error, ErrorDomain.Tokenizer));
 
-            SkipUntil(LF);
+            SkipLine();
             return -1;
         }
 
@@ -1837,13 +2079,16 @@ public ref struct TOMLTokenizer
         for (int i = 0; i < digits; i++)
         {
             //Convert char to hexadecimal digit
-            int digit = buffer[i] < AsciiDigitEnd ? 
-                        buffer[i] - AsciiNumOffset : 
+            int digit = buffer[i] < AsciiDigitEnd ?
+                        buffer[i] - AsciiNumOffset :
                         (buffer[i] & AsciiUpperNormalizeMask) - AsciiHexNumOffset;
 
             if ((uint)digit > 15)
             {
-                ErrorLog.Add($"{Reader.Position}: {i + 1}. character '{buffer[i]}' in escape sequence is not a hexadecimal digit.");
+                Logger.Add(new TomlSyntaxError(Reader.Line, Reader.Column,
+                    $"The {i + 1}. character '{buffer[i]}' in escape sequence is not a hexadecimal digit.",
+                    ErrorSeverity.Error, ErrorDomain.Tokenizer));
+
                 codePoint = -1;
                 break;
             }

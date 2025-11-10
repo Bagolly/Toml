@@ -14,13 +14,13 @@ internal class Program
 {
     static void Main()
     {
-        using FileStream fs = new("C:/Users/BAGOLY/Desktop/TOML Project/TomlTest/test-realistic-small.txt",
+        using FileStream fs = new("C:/Users/BAGOLY/Desktop/TOML Project/TomlTest/prefixnum-synthetic.txt",
                                   FileMode.Open, FileAccess.Read, FileShare.Read,
                                   bufferSize: 8192,
                                   FileOptions.SequentialScan);
         using TomlStreamSource source = new(fs);
        
-        TTable root = new TOMLParser(new(source, comments: TomlCommentMode.Validate)).Parse();
+        TTable root = new TOMLParser(new(source, new(TomlCommentMode.Validate))).Parse();
 
         var converter = new TomlJsonConverter();
         

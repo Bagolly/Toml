@@ -7,7 +7,7 @@ namespace Toml
 {
     //Copied then modified from .NET (internal) code.
     //Uses a stack-allocated buffer of the assigned capacity, and rents an array from the shared ArrayPool if more memory is needed.
-    public ref struct ValueStringBuilder //MUST BE PASSED AS REF WHEN ARGUMENT!
+    public ref struct ValueStringBuilder //Remember that this will result in a copy if not passed with ref!
     {
         private char[]? _arrayToReturnToPool;
         private Span<char> _chars;

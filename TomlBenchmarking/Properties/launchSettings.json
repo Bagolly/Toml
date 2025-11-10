@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "TomlBenchmarking": {
+      "commandName": "Project",
+      "hotReloadEnabled": false
+    }
+  }
+}

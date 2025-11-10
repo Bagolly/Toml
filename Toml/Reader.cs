@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Formats.Asn1;
 using System.Linq;
 using System.Text;
-using static Toml.Extensions.TomlExtensions;
+using static Toml.Extensions.Extensions;
 using static Toml.Tokenization.Constants;
 using System.Threading.Tasks;
 using Toml.Runtime;
@@ -14,6 +14,7 @@ using System.Runtime.Intrinsics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using CommandLine;
+using Toml.Diagnostics;
 
 namespace Toml.Reader;
 
@@ -24,18 +25,17 @@ namespace Toml.Reader;
 public interface ITomlReaderSource
 {   
     /* Regarding UTF-8 validation
-       Only the default TomlStreamSource does complete UTF-8 validation.
+       Only the default TomlStreamSource does complete UTF-8 validation, while
+       TomlStringSource assumes a valid UTF-8 string, as that's the contract of System.String.
      
        If you provide your own implementation, you are responsible for
        indicating an UTF-8 encoding issue in the document. 
-       Since StreamReader throws a DecoderException, this is caught and reported internally.
-       The tokenizer catches and reports them appropriately.
+       Since StreamReader throws a DecoderException, this is caught, then wrapped internally.
+       The tokenizer then reports them appropriately.
 
-       The tokenizer does validate escape sequences and line-endings,
-       as well as control characters in strings and comments,
-       
-       but because it works with characters and not bytes, it cannot detect an invalid
-       UTF-8 byte sequence.
+       The tokenizer validates all escape sequences, line-endings,
+       and control characters, but because it works with characters and 
+       not bytes, it cannot detect an invalid UTF-8 byte sequence.
      */
 
 
@@ -46,7 +46,7 @@ public interface ITomlReaderSource
                       and the character should be returned as an int.
                       If there are no more characters to be read, the method should return -1.
      */
-    public abstract int Read();
+    public int Read();
 
 
     /* Expected behavior:
@@ -57,22 +57,23 @@ public interface ITomlReaderSource
                       The character should be returned as an int.
                       If there are no more characters to be read, the method should return -1.
      */
-    public abstract int Peek();
+    public int Peek();
 
 
     /* Expected behavior:
-       Short version: just like StreamReader's ReadBlock().
+       Short version: should work just like StreamReader's ReadBlock().
        
        Long version: this method should read characters into the provided buffer. It should NEVER read more characters 
                      than what was asked (meaning the length of the provided buffer). If there aren't enough characters
-                     available it should return as many as available.
-                     Essentially, the returned amount of characters should ALWAYS be between  0 and buffer.Length - 1 (both inclusive).
+                     available, it should return as many as available.
+                     The returned amount of characters should ALWAYS be between  0 and buffer.Length - 1 (both inclusive).
                      Newlines and new line characters should be returned as well, without any special handling, and MUST NOT be removed,
-                     otherwise the line and column tracker in the tokenizer will be inaccurate (especially for documents with lots of timestamps, don't ask).
+                     otherwise the line and column tracker in the tokenizer will be inaccurate.
 
-                     See the documentation for StreamReader.ReadBlock() for more details on expected behavior and/or implementation.
+                     See the documentation for StreamReader.ReadBlock() for more details.
+                     Refer to TomlStreamSource and/or TomlStringSource for reference implementations.
      */
-    public abstract int ReadBlock(Span<char> buffer);
+    public int ReadBlock(Span<char> buffer);
 }
 
 
@@ -80,35 +81,36 @@ public interface ITomlReaderSource
 /// <summary>
 /// Represents a reader for providing input to the TOML tokenizer.
 /// </summary>
-class TomlReader
+sealed class TomlReader
 {
     public int Line
     {
         get => _line;
-        protected set { _line = value; Column = 1; }
+        private set { _line = value; Column = 1; }
     }
 
     private int _line;
 
-    public int Column { get; protected set; }
+    public int Column { get; private set; }
 
-    public ReadOnlySpan<char> Position => $"Line {Line} Column {Column}";
+    public TomlDiagnosticsManager Logger { get; }
 
-
-    protected ITomlReaderSource Source { get; init; }
-
-
+    private ITomlReaderSource Source { get; init; }
 
     /// <summary>
     /// Initializes the line and column trackers.
     /// </summary>
-    public TomlReader(ITomlReaderSource source)
+    public TomlReader(ITomlReaderSource source, TomlDiagnosticsManager logger)
     {
         Line = 1;
         Column = 1;
         Source = source;
+        Logger = logger;
     }
 
+    private void LogError(string message, ErrorSeverity s = ErrorSeverity.Error) 
+        => Logger.Add(new TomlSyntaxError(Line, Column, message, s, ErrorDomain.Reader));
+    
 
     #region Skip
 
@@ -121,10 +123,9 @@ class TomlReader
     /// <exception cref="TomlReaderException"></exception>
     public void SkipWhiteSpace(bool skipLineEnding = false)
     {
-        while (true)
-        {
-            int peekResult = Source.Peek(); ;
-            switch (peekResult)
+        int peekResult;
+        while (true) 
+            switch (peekResult = Source.Peek())
             {
                 case SPACE or TAB:
                     _ = Source.Read();
@@ -140,9 +141,8 @@ class TomlReader
                     _ = Source.Read();
 
                     if (Source.Read() is not LF)
-                    {
-                        throw new TomlReaderException("Expected carriage return to be followed by a linefeed.", Line, Column);
-                    }
+                        LogError("Expected carriage return to be followed by a linefeed.");
+                        
                     ++Line;
                     break;
 
@@ -151,17 +151,15 @@ class TomlReader
 
                 default:
                     if (char.IsControl((char)peekResult))
-                        throw new TomlReaderException($"Found unescaped control character '{GetFriendlyNameFor(peekResult)}'.", Line, Column);
+                    {
+                        LogError($"Found unescaped control character '{GetFriendlyNameFor(peekResult)}'.");
+                        
+                        //Try to recover by skipping if in aggregate mode.
+                        _ = Source.Read();
+                    }
                     return;
             }
-        }
     }
-
-
-    /// <summary>
-    /// Consumes characters while they match <paramref name="c"/>.
-    /// </summary>
-    public void SkipWhile(char c) { while (MatchNext(c)) ; }
 
     #endregion
 
@@ -188,12 +186,17 @@ class TomlReader
 
             case CR:
                 if (Source.Read() is not LF)
-                    throw new TomlReaderException($"Expected carriage return to be followed by a linefeed.", Line, Column);
+                    LogError("Expected carriage return to be followed by a linefeed.");
+
                 goto case LF;
                 
             default:
                 if (char.IsControl((char)readResult))
-                    throw new TomlReaderException($"Found unescaped control character '{GetFriendlyNameFor(readResult)}'.", Line, Column);
+                {
+                    LogError($"Found unescaped control character '{GetFriendlyNameFor(readResult)}'.");
+                    readResult = Read(); //Try to recover by reading to next when in aggregate mode.
+                }
+
                 ++Column;
                 break;
         }
@@ -218,7 +221,7 @@ class TomlReader
 
 
     /// <summary>
-    /// Does what any try-variant of an exising method would do in C#. I'm getting tired of writing these for internal types...
+    /// Does what any try-variant of an exising method would do in C#.
     /// </summary>
     public bool TryRead(out char result)
     {
@@ -236,25 +239,11 @@ class TomlReader
 
 
     /// <summary>
-    /// Returns the next available character, consuming it. Ignores tab and space.
-    /// </summary>
-    /// <remarks>
-    /// <paramref name="skipNewLine"/>: skip line-endings as well.
-    /// </remarks>
-    /// <returns>The next available character, or -1 if no more characters are available to read.</returns>
-    public int ReadSkip(bool skipNewLine = false)
-    {
-        SkipWhiteSpace(skipNewLine);
-        return Read();
-    }
-
-
-    /// <summary>
-    /// Wraps the base readers ReabBlock method to enable tracking position.
+    /// Wraps the base readers ReadBlock method to enable tracking position.
     /// </summary>
     public unsafe int ReadBlock(Span<char> buffer)
     {
-        Debug.Assert(buffer.Length < 512, "Possible misuse; the provided buffer is unusually large. Please double check if you actually intended to call this method!");
+        Debug.Assert(buffer.Length <= 512, "Possible misuse; the provided buffer is unusually large. Please double check usage!");
 
         int readResult = Source.ReadBlock(buffer);
 
@@ -288,7 +277,7 @@ class TomlReader
         //should EOF count? Probably. But changing now could break previous code, so this stays.
 
         //Because this method is used in certain loops, this short circuit should help with most calls,
-        //since the common case there is no line ending (and maybe even help the branch predictor?).
+        //since the common case is no line endings.
         if (Source.Peek() > CR)
             return false;
 
@@ -304,7 +293,7 @@ class TomlReader
                 _ = Source.Read();
 
                 if (Source.Read() is not LF)
-                    throw new TomlReaderException($"Expected carriage return to be followed by a linefeed.", Line, Column);
+                    LogError("Expected carriage return to be followed by a linefeed.");
 
                 ++Line;
                 return true;

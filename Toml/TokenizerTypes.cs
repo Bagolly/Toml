@@ -1,19 +1,24 @@
-﻿namespace Toml.Tokenization;
+﻿using System.Diagnostics.CodeAnalysis;
+using BenchmarkDotNet.Configs;
+using Toml.Diagnostics;
+using Toml.Reader;
+
+namespace Toml.Tokenization;
 
 
 
 internal static class Constants
 {
-    #region Unicode "Magic Numbers"
+    #region Unicode Magic Numbers
     internal const int HighSurrogateStart = 0xD800;
     internal const int HighSurrogateRange = 0x3FF;
-    internal const int LowSurrogateStart  = 0xDC00;
-    internal const int LowSurrogateEnd    = 0xDFFF;
-    internal const int Plane1Start        = 0x10_000;
-    internal const int ValidCodepointEnd  = 0x110_000;
+    internal const int LowSurrogateStart = 0xDC00;
+    internal const int LowSurrogateEnd = 0xDFFF;
+    internal const int Plane1Start = 0x10_000;
+    internal const int ValidCodepointEnd = 0x110_000;
     #endregion
 
-    #region ASCII "Magic Numbers"
+    #region ASCII Magic Numbers
     /// <summary>
     /// The exlusive upper bound of ASCII digits.
     /// </summary>
@@ -76,7 +81,7 @@ internal static class Constants
                                                                       "SP"];
 
 
-    #region Fixed Index Constants
+    #region Fixed Format Index
     internal const int Time_H1 = 0;
     internal const int Time_H2 = 1;
     internal const int Time_HourSeparator = 2;
@@ -125,8 +130,8 @@ public enum TomlTokenType
     /// <summary>
     /// A table declared with a table header: <c><see langword="["/>table<see langword="]"/></c>.
     /// </summary>
-    TableDecl, 
-    
+    TableDecl,
+
     /// <summary>
     /// Marks the start of a table header.
     /// </summary>
@@ -136,7 +141,7 @@ public enum TomlTokenType
     /// An arraytable declared with an arraytable header: <c><see langword="[["/>array-table<see langword="]]"/></c>.
     /// </summary>
     ArrayTableDecl,
-    
+
     /// <summary>
     /// Marks the start of an arraytable header.
     /// </summary>
@@ -154,7 +159,7 @@ public enum TomlTokenType
 
 
 public enum TomlTokenMetadata
-{   
+{
     None,
 
     //Key
@@ -168,7 +173,7 @@ public enum TomlTokenMetadata
     Multiline,
     Literal = 9,
     MultilineLiteral = 11,
-    
+
     //Timestamp
     DateOnly,
     TimeOnly,
@@ -205,3 +210,20 @@ public readonly record struct TOMLValue : IEquatable<TOMLValue>
     public override string ToString() => $"Type: {TokenType,-14} | ValueIndex: {ValueIndex} | Metadata (raw): ";
 }
 
+
+public readonly struct TomlConfig
+{
+    internal readonly ErrorReportPolicy _policy;
+    internal readonly ErrorSeverity _throwThreshold;
+    internal readonly TomlCommentMode _commentPolicy;
+    
+
+    public TomlConfig(TomlCommentMode mode = TomlCommentMode.Validate,
+                      ErrorReportPolicy policy = ErrorReportPolicy.Throw,
+                      ErrorSeverity threshold = ErrorSeverity.Error)
+    {
+        _commentPolicy = mode;
+        _policy = policy;
+        _throwThreshold = threshold;
+    }
+}

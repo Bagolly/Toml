@@ -27,7 +27,7 @@
 							but also, even faster.
 							Performance: 16ms, highly stable just like R2R.-->
 		<PublishAot>false</PublishAot>              <!--TOGGLE AOT PUBLISH HERE-->
-		<PublishReadyToRun>true</PublishReadyToRun> <!--TOGGLE R2R PUBLISH HERE-->
+		<PublishReadyToRun>false</PublishReadyToRun> <!--TOGGLE R2R PUBLISH HERE-->
 	</PropertyGroup>
 	
   <ItemGroup>

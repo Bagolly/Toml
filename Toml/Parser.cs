@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using Toml.Diagnostics;
 using Toml.Runtime;
 using Toml.Tokenization;
 using static Toml.Runtime.TObject;
@@ -20,21 +21,14 @@ public sealed class TOMLParser
 
     public List<TObject> Values { get; init; }
 
-    public TOMLParser(Queue<TOMLValue> tokenStream, List<TObject> values)
-    {
-        ArgumentException.ThrowIfNullOrEmpty(nameof(tokenStream), "No tokens provided.");
-        ArgumentException.ThrowIfNullOrEmpty(nameof(values), "No values provided");
-
-        TokenStream = tokenStream;
-        Values = values;
-        DocumentRoot = new(TOMLType.HeaderTable);
-    }
+    public TomlDiagnosticsManager Logger { get; }
 
 
     public TOMLParser(TOMLTokenizer tokenizer)
-    {
+    {   
         (TokenStream, Values) = tokenizer.TokenizeFile();
         DocumentRoot = new(TOMLType.HeaderTable);
+        Logger = tokenizer.Logger;
     }
 
 
@@ -61,14 +55,13 @@ public sealed class TOMLParser
                     break;
 
                 case ArrayTableStart: //arraytable declarations that change the scope to their last defined table.
-
                     localRoot.CloseTable();
                     localRoot = AddArrayTable(DocumentRoot);
                     break;
 
                 case Eof:
                     goto FINISH;
-
+                   
                 default:
                     Console.WriteLine("Unexpected token: " + currentToken);
                     goto FINISH;
@@ -79,6 +72,12 @@ public sealed class TOMLParser
         return DocumentRoot;
     }
 
+    private static TomlParserException CreateFatalError(int i, string msg)
+        => new TomlParserException(new TomlParserError(i, msg, ErrorSeverity.Fatal, ErrorDomain.Parser));
+    
+    private void LogParseError(int i, string msg, ErrorSeverity severity)
+        => Logger.Add(new TomlParserError(i,msg, severity, ErrorDomain.Parser));    
+
 
     private TTable ResolveKeyValuePath(TTable containing)
     {
@@ -88,17 +87,17 @@ public sealed class TOMLParser
 
             if (containing.Values.TryGetValue(fragment.Value, out var existingValue)) //It is not yet known if it's actually a table.
             {
-                if (existingValue is not TTable existingTable)
-                    throw new TomlRuntimeException($"Invalid path; expected {fragment} to refer to a table, not a {existingValue.Type}.");
-
+                if (existingValue is not TTable existingTable)    
+                    throw CreateFatalError(TokenStream.Count - 2, 
+                          $"Invalid path; expected {fragment} to refer to a table, not a {existingValue.Type}.");
 
                 if (existingTable.Type is TOMLType.HeaderTable)
-                    throw new TomlRuntimeException($"Cannot modify existing table '{fragment.Value}', because it was already declared explicitly with a table header.");
-
-
+                    throw CreateFatalError(TokenStream.Count - 2,
+                          $"Cannot modify existing table '{fragment.Value}', because it was already declared explicitly with a table header.");
+                
                 if (existingTable.State is TomlTableState.Closed)
-                    throw new TomlRuntimeException("Cannot inject key/value pairs into another table's subtable after it has already been defined.");
-
+                    throw CreateFatalError(TokenStream.Count - 2,
+                        "Cannot inject key/value pairs into another table's subtable after it has already been defined.");
 
                 else
                     return ResolveKeyValuePath(existingTable);
@@ -125,14 +124,14 @@ public sealed class TOMLParser
         {
             TKey fragment = (TKey)NextValue();
 
-
-            if (containing.Values.TryGetValue(fragment.Value, out var existingValue)) //It is not yet known if it's actually a table.
+            //It is not yet known if it's actually a table.
+            if (containing.Values.TryGetValue(fragment.Value, out var existingValue))
             {
-
                 if (existingValue is TArray existingArrayTable)
                 {
                     if (existingArrayTable.Type is not TOMLType.ArrayTable)
-                        throw new TomlRuntimeException("Cannot reference statically defined array {fragment.Value} in a header.");
+                        throw CreateFatalError(TokenStream.Count - 2, 
+                            $"Cannot reference statically defined array {fragment.Value} in a header.");
 
                     else
                         return ResolveHeaderPath((TTable)existingArrayTable[^1]);
@@ -140,23 +139,18 @@ public sealed class TOMLParser
 
 
                 if (existingValue is not TTable existingTable)
-                    throw new TomlRuntimeException($"Invalid path, {existingValue} is not a table.");
-
-
-                //[rare] Attempted injection by abusing dotted key and supertable-declarations, see example below
-                /* 
-                   a.b = 2
-                   [a]
-                   k = 123 # would inject directly into the closed scope of 'a'.
+                    throw CreateFatalError(TokenStream.Count - 2,
+                        $"Invalid path, {existingValue} is not a table.");
+                
+                /* [rare] Attempted injection by abusing dotted key and supertable-declarations, see example below.
+                   This was explicitly made illegal by the standard (apparently).
+                        a.b = 2
+                        [a]
+                        k = 123 # would inject directly into the closed scope of 'a'.
                  */
                 if (existingTable.Type is TOMLType.KeyValTable && existingTable.State is TomlTableState.Closed)
-                    throw new TomlRuntimeException($"Cannot redeclare table '{fragment.Value}' because it was defined via dotted keys in another table (or root).");
-
-
-                //header table already explicitly declared
-                //  if (existingTable.State is TomlTableState.Closed)
-                //      throw new TomlRuntimeException($"Cannot redefine the existing table [{fragment.Value}]");
-
+                    throw CreateFatalError(TokenStream.Count - 2,
+                        $"Cannot redeclare table '{fragment.Value}' because it was defined via dotted keys in another table (or root).");
 
                 else
                     return ResolveHeaderPath(existingTable);
@@ -177,52 +171,56 @@ public sealed class TOMLParser
 
     private TTable AddTable(TTable containing) //Handles table declarations
     {
-        TokenStream.Dequeue(); //Dequeue declstart dummy token.
+        //Dequeue declstart marker token.
+        TokenStream.Dequeue();
 
 
-        if (TokenStream.Peek().TokenType is ImplicitHeaderTable) //if the path to the table is a dotted key, resolve the path.
+        //If the path to the table is a dotted key, resolve the path.
+        if (TokenStream.Peek().TokenType is ImplicitHeaderTable)
             containing = ResolveHeaderPath(containing);
-
-
-        if (TokenStream.Peek().TokenType is not TableDecl) //todo remove temp debug code
-        {
-            Console.WriteLine(TokenStream.Peek().TokenType);
-            _ = 1;
-        }
 
 
         Debug.Assert(TokenStream.Peek().TokenType is TableDecl);
 
 
         if (containing.Type is TOMLType.InlineTable)
-            throw new TomlRuntimeException($"Table declarations cannot extend inline tables.");
+        {
+            LogParseError(TokenStream.Count - 1, "Table declarations cannot extend inline tables.", ErrorSeverity.Error);
 
+            return new TTable(TOMLType.HeaderTable); //Worth a try...
+        }
 
-        //honestly, this looks more like an internal bug. The tokenizer should fail before this even executes.
+        //The tokenizer should fail before this even executes.
         if (!TokenStream.TryDequeue(out var keyToken))
-            throw new TomlRuntimeException("Table header's dotted key is missing the table itself; uncaught syntax error.");
-
+            throw new TomlInternalException(new(
+                "Uncaught syntax error: Table header's dotted key is missing the table itself.",
+                ErrorSeverity.Fatal,
+                ErrorDomain.Parser));
 
         if (keyToken.TokenType is Eof || Values[keyToken.ValueIndex] is not TKey tableKey)
-            throw new TomlRuntimeException($"Expected a table declaration, but found a token of type '{keyToken.TokenType}'");
+            throw CreateFatalError(TokenStream.Count - 1,
+                $"Expected a table declaration, but found a token of type '{keyToken.TokenType}'");
 
 
         if (containing.Values.TryGetValue(tableKey.Value, out var existingValue))
         {
             if (existingValue is TTable existingTable)
             {
+                //Scope change will set this to Closed upon exit, so the next declaration should throw
                 if (existingTable.Type is TOMLType.HeaderTable && existingTable.State is TomlTableState.Open)
-                    return existingTable; //scope change will set this to Closed upon exit, so the next declaration should throw
+                    return existingTable;
 
 
                 //Existing header table is already closed -> redeclaration error.
                 if (existingTable.Type is TOMLType.HeaderTable && existingTable.State is TomlTableState.Closed)
-                    throw new TomlRuntimeException($"Cannot redefine the existing table '{tableKey.Value}' because it was already declared explicitly.");
+                    throw CreateFatalError(TokenStream.Count - 1, 
+                        $"Cannot redefine the existing table '{tableKey.Value}' because it was already declared explicitly.");
             }
 
 
             else
-                throw new TomlRuntimeException($"Cannot define the table '{tableKey.Value}', because a value for it already exists: {existingValue}");
+                throw CreateFatalError(TokenStream.Count - 1,
+                    $"Cannot define the table '{tableKey.Value}', because a value for it already exists: {existingValue}");
         }
 
 
@@ -242,30 +240,35 @@ public sealed class TOMLParser
 
 
         if (!TokenStream.TryDequeue(out var keyToken))
-            throw new TomlRuntimeException("Arraytable header's dotted key is missing the table itself; uncaught syntax error.");
-
+            throw new TomlInternalException(new(
+                  "Uncaught syntax error: Arraytable header's dotted key is missing the table itself.",
+                  ErrorSeverity.Fatal,
+                  ErrorDomain.Parser));
 
         if (keyToken.TokenType is Eof || Values[keyToken.ValueIndex] is not TKey key)
-            throw new TomlRuntimeException($"Expected a table declaration, but found a token of type <{keyToken.TokenType}>");
+            throw CreateFatalError(TokenStream.Count - 1,
+                $"Expected an arraytable declaration, but found a token of type '{keyToken.TokenType}'");
 
 
         //Arraytables are a bit different when it comes to "redeclarations", since every new declaration adds a new table to the array,
         //and every reference to it should return its last defined table.
         if (containingTable.Values.TryGetValue(key.Value, out TObject? existingValue))
         {
-            //Not an array
+            //Not an arraytable
             if (existingValue is not TArray existingArrayTable)
-                throw new TomlRuntimeException($"A value for the key '{key.Value}' already exists, but had the type {existingValue.Type}, instead of arraytable.");
+                throw CreateFatalError(TokenStream.Count - 1,
+                    $"A value for the key '{key.Value}' already exists, but had the type {existingValue.Type}, instead of arraytable.");
 
 
-            //Array, but the wrong kind
+            //Arraytable, but the wrong kind
             if (existingValue.Type is TOMLType.Array)
-                throw new TomlRuntimeException($"Statically defined array '{key.Value}' cannot be appended to.");
+                throw CreateFatalError(TokenStream.Count - 1, 
+                    $"Statically defined array '{key.Value}' cannot be appended to.");
 
 
             else
             {
-                //This element should be inaccesible from now on anyways, but better to close it properly, since it goes out of scope here.
+                //This element is inaccesible from now on, but it's better to close it properly.
                 ((TTable)existingArrayTable.Values[^1]).CloseTable();
 
                 TTable newElement = new(TOMLType.HeaderTable);
@@ -285,20 +288,34 @@ public sealed class TOMLParser
     private void AddKeyValuePair(TTable to)
     {
         if (!TokenStream.TryDequeue(out var keyToken))
-            throw new TomlRuntimeException("Not enough tokens to resolve the key/value pair, possibly because of a syntax error.");
+            throw CreateFatalError(TokenStream.Count - 1,
+                "Not enough tokens to resolve the key/value pair, possibly because of a syntax error.");
 
 
         if (keyToken.TokenType is Eof || Values[keyToken.ValueIndex] is not TKey key)
-            throw new TomlRuntimeException($"Expected a key to start a key/value pair, but found a token of type '{keyToken.TokenType}'");
-
+        {
+            LogParseError(TokenStream.Count - 2,
+                $"Expected a key to start a key/value pair, but found a token of type '{keyToken.TokenType}'",
+                ErrorSeverity.Error);
+            
+            return;
+        }
 
         if (to.Values.TryGetValue(key.Value, out TObject? value))
-            throw new TomlRuntimeException($"Redefiniton: a value for the key '{key.Value}' already exists: '{value}' Type: {value.Type}");
+        {
+            LogParseError(TokenStream.Count - 1,
+                 $"Redefiniton: a value for the key '{key.Value}' already exists: '{value}' Type: {value.Type}",
+                 ErrorSeverity.Error);
 
+            //Skip the value if its key is invalid, since this is a non-fatal error, to avoid causing a fatal error later.
+            TokenStream.Dequeue();
+            return;
+        }
 
         if (TokenStream.Peek().TokenType is InlineTableStart)
         {
-            TokenStream.Dequeue(); //dequeue the delimiter token
+            //Dequeue the opening delimiter '{'.
+            TokenStream.Dequeue();
 
             TTable inlineTable = new(TOMLType.InlineTable);
 
@@ -315,16 +332,13 @@ public sealed class TOMLParser
     private TObject ResolveValue() => ResolveValue(TokenStream.Dequeue());
 
 
-    private TObject ResolveValue(TOMLValue token)
+    private TObject ResolveValue(TOMLValue token) => token.TokenType switch
     {
-        return token.TokenType switch
-        {
-            TableDecl or ArrayTableDecl => throw new TomlRuntimeException("Table and arraytable declarations are not allowed as values; use inline tables or arrays instead."),
-            ArrayStart => ParseArray(),
-            InlineTableStart => ParseInlineTable(new(TOMLType.InlineTable)), //nested inline table or array element.
-            _ => Values[token.ValueIndex],  //single value tokens like integers, bools, etc.; simply return the value.
-        };
-    }
+        TableDecl or ArrayTableDecl => throw CreateFatalError(TokenStream.Count - 2, "Table and arraytable declarations are not allowed as values; use inline tables or arrays instead."),
+        ArrayStart => ParseArray(),
+        InlineTableStart => ParseInlineTable(new(TOMLType.InlineTable)), //Nested inline table or array element.
+        _ => Values[token.ValueIndex],                                   //Single value tokens; simply return the value.
+    };
 
 
     private TArray ParseArray()
@@ -376,7 +390,8 @@ public sealed class TOMLParser
             }
 
             else
-                throw new TomlRuntimeException($"Syntax error: Unexpected token in inline table: {token}. Expected a key/value pair or '}}'.");
+                throw CreateFatalError(TokenStream.Count - 2, 
+                    $"Syntax error: Unexpected token in inline table: {token}. Expected a key/value pair or '}}'.");
         }
 
 
