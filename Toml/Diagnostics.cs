@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
@@ -12,7 +13,7 @@ namespace Toml.Diagnostics;
 
 
 public enum ErrorSeverity
-{   
+{
     Info,
     Warning,
     Error,
@@ -125,22 +126,22 @@ public class TomlError : IEquatable<TomlError>
 
     private static readonly string MessageTemplate =
     """
-    Severity: {0}
-    Domain:   {1}
-    Message:  {2}
+    Severity:     {0}
+    Domain:       {1}
+    Description:  {2}
     """;
 
-    public override string ToString() 
+    public override string ToString()
         => string.Format(format: MessageTemplate, Severity, Domain, Message);
 
     public override int GetHashCode()
         => HashCode.Combine(Domain, Severity, Message);
 
     public bool Equals(TomlError? other)
-        => other    != null &&
-           Domain   == other.Domain &&
+        => other != null &&
+           Domain == other.Domain &&
            Severity == other.Severity &&
-           Message  == other.Message;
+           Message == other.Message;
 
     public override bool Equals(object? obj)
         => Equals(obj as TomlError);
@@ -154,10 +155,10 @@ public sealed class TomlSyntaxError : TomlError, IEquatable<TomlSyntaxError>
 
     private static readonly string MessageTemplate =
         """
-        Severity: {0} 
-        Domain:   {1} 
-        Position: line {2}; column {3}
-        Message:  '{4}'
+        Severity:     {0} 
+        Domain:       {1} 
+        Position:     line {2}; column {3}
+        Description:  {4}
         """;
 
     public TomlSyntaxError(int l, int c, string m, ErrorSeverity s, ErrorDomain d) : base(m, s, d)
@@ -175,32 +176,30 @@ public sealed class TomlSyntaxError : TomlError, IEquatable<TomlSyntaxError>
                               Message);
 
     public bool Equals(TomlSyntaxError? other) => 
-        other  != null &&
-        Line   == other.Line && 
+        other != null && 
+        Line == other.Line &&
         Column == other.Column &&
         Domain == other.Domain;
 
-    public override bool Equals(object? obj) => 
-        obj is TomlSyntaxError other && Equals(other);
-    
-    public override int GetHashCode() => 
-        HashCode.Combine(Line, Column, (int)Domain);
+    public override bool Equals(object? obj) => obj is TomlSyntaxError other && Equals(other);
+
+    public override int GetHashCode() => HashCode.Combine(Line, Column, (int)Domain);
 }
 
 
 public sealed class TomlParserError : TomlError, IEquatable<TomlParserError>
-{   
+{
     public int TokenIndex { get; private init; }
 
     private static readonly string MessageTemplate =
     """
-    Severity: {0} 
-    Domain:   {1} 
-    Index:    {2}
-    Message:  '{3}'
+    Severity:     {0} 
+    Domain:       {1} 
+    Index:        {2}
+    Description:  {3}
     """;
 
-    public TomlParserError(int i, string m, ErrorSeverity s, ErrorDomain d) 
+    public TomlParserError(int i, string m, ErrorSeverity s, ErrorDomain d)
         : base(m, s, d) => TokenIndex = i;
 
     public override string ToString() =>
@@ -227,16 +226,14 @@ public abstract class TomlExcpetionBase : ApplicationException
 {
     public TomlError Error { get; init; }
 
-    public TomlExcpetionBase(TomlError error) : base(error.Message)
-        => Error = error;
+    public TomlExcpetionBase(TomlError error) : base(error.Message) => Error = error;
 }
 
 /// <summary>
 /// Represents exceptions that occured in the tokenization phase.
 /// <para>Usually indicates a syntactic or other formatting issue.</para>
 /// </summary>
-public sealed class TomlTokenizerException(TomlSyntaxError error)
-    : TomlExcpetionBase(error) { }
+public sealed class TomlTokenizerException(TomlSyntaxError error) : TomlExcpetionBase(error) { }
 
 
 /// <summary>
@@ -267,6 +264,16 @@ public sealed class TomlTypeException(TomlError error) : TomlExcpetionBase(error
 public sealed class TomlInternalException(TomlError error) : TomlExcpetionBase(error) { }
 
 
+public sealed class TomlAggregateException : TomlExcpetionBase
+{
+    public readonly IReadOnlyCollection<TomlError> Errors;
+
+    public TomlAggregateException(TomlError rootError, List<TomlError> errors) : base(rootError)
+        => Errors = errors.AsReadOnly();
+}
+
+
+
 public sealed class TomlDiagnosticsManager
 {
     private readonly ErrorReportPolicy _policy;
@@ -281,7 +288,7 @@ public sealed class TomlDiagnosticsManager
         _policy = policy;
         _thresHold = throwThreshold;
     }
-    
+
     internal void Add(TomlError error)
     {
         if (error.Severity is ErrorSeverity.Fatal)
@@ -295,7 +302,7 @@ public sealed class TomlDiagnosticsManager
 
     public IEnumerable<TomlError> Errors => _errors;
 
-    public IEnumerable<TomlError> ByDomain(ErrorDomain domain) 
+    public IEnumerable<TomlError> ByDomain(ErrorDomain domain)
         => _errors.Where(error => error.Domain == domain);
 
     public IEnumerable<TomlError> BySeverity(ErrorSeverity severity)
@@ -307,12 +314,19 @@ public sealed class TomlDiagnosticsManager
 
 
     [DoesNotReturn, StackTraceHidden]
-    private static void ThrowError(TomlError error) => throw error.Domain switch
+    private void ThrowError(TomlError error)
     {
-        ErrorDomain.Reader => new TomlReaderException((TomlSyntaxError)error),
-        ErrorDomain.Tokenizer => new TomlTokenizerException((TomlSyntaxError)error),
-        ErrorDomain.Parser => new TomlParserException((TomlParserError)error),
-        ErrorDomain.Type => new TomlTypeException(error),
-        _ => new TomlInternalException(error),
-    };
+        //The throw cause is set to root error; all previous errors (if any) are aggregated.
+        if (_errors.Count > 0)
+            throw new TomlAggregateException(error, _errors);
+
+        throw error.Domain switch
+        {
+            ErrorDomain.Reader => new TomlReaderException((TomlSyntaxError)error),
+            ErrorDomain.Tokenizer => new TomlTokenizerException((TomlSyntaxError)error),
+            ErrorDomain.Parser => new TomlParserException((TomlParserError)error),
+            ErrorDomain.Type => new TomlTypeException(error),
+            _ => new TomlInternalException(error),
+        };
+    }
 }
