@@ -56,7 +56,7 @@ public ref struct TOMLTokenizer
     }
 
     //Hints code analyzer about definite assignment when policy is Store, to stop it from requiring null forgiving.
-    [MemberNotNullWhen(true, "Comments")] //no longer used
+    [MemberNotNullWhen(true, "Comments")]
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private readonly bool StoreComments() => _commentPolicy is TomlCommentMode.Store;
     
@@ -152,9 +152,10 @@ public ref struct TOMLTokenizer
 
         if (!Reader.MatchLineEnding() && Reader.Peek() is not EOF)
         {
+            _ = _builder;
             Logger.Add(new TomlSyntaxError(Reader.Line,
                            Reader.Column,
-                           "Found trailing characters starting from this position.",
+                           $"Found trailing character sequence '{(char)Reader.Peek()}...'",
                            ErrorSeverity.Error,
                            ErrorDomain.Tokenizer));
         }
@@ -177,7 +178,7 @@ public ref struct TOMLTokenizer
                 StoreComment(callsiteId);
                 return;
 
-            case TomlCommentMode.Skip:
+            case TomlCommentMode.Ignore:
                 while (Reader.UncheckedRead() is not LF or EOF) ;
                 return;
         }
@@ -215,7 +216,8 @@ public ref struct TOMLTokenizer
     private void StoreComment([ConstantExpected] int callsiteId)
     {
         Debug.Assert(_commentPolicy is TomlCommentMode.Store, "Tried to store a comment but comment list was null.");
-        if (StoreComments())
+        
+        if (!StoreComments())
             throw new TomlInternalException(new("Attempted to store comment with non-store policy.", ErrorSeverity.Fatal, ErrorDomain.Internal));
 
         int readResult;
