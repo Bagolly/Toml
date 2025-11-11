@@ -26,7 +26,8 @@ public interface ITomlReaderSource
 {   
     /* Regarding UTF-8 validation
        Only the default TomlStreamSource does complete UTF-8 validation, while
-       TomlStringSource assumes a valid UTF-8 string, as that's the contract of System.String.
+       TomlStringSource assumes a valid UTF-16 string, as that's the contract 
+       of System.String.
      
        If you provide your own implementation, you are responsible for
        indicating an UTF-8 encoding issue in the document. 
