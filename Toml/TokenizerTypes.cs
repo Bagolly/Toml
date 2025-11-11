@@ -103,7 +103,7 @@ public enum TomlCommentMode
 {
     Validate,
     Store,
-    Skip,
+    Ignore,
 }
 
 
@@ -218,11 +218,11 @@ public readonly struct TomlConfig
     internal readonly TomlCommentMode _commentPolicy;
     
 
-    public TomlConfig(TomlCommentMode mode = TomlCommentMode.Validate,
+    public TomlConfig(TomlCommentMode comments = TomlCommentMode.Validate,
                       ErrorReportPolicy policy = ErrorReportPolicy.Throw,
                       ErrorSeverity threshold = ErrorSeverity.Error)
     {
-        _commentPolicy = mode;
+        _commentPolicy = comments;
         _policy = policy;
         _throwThreshold = threshold;
     }
