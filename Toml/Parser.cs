@@ -23,19 +23,21 @@ public sealed class TOMLParser
 
     public TomlDiagnosticsManager Logger { get; }
 
-
     public TOMLParser(TOMLTokenizer tokenizer)
-    {   
+    {
+
+        Logger = tokenizer.Logger;
         (TokenStream, Values) = tokenizer.TokenizeFile();
         DocumentRoot = new(TOMLType.HeaderTable);
-        Logger = tokenizer.Logger;
+
+        if(Logger.HasErrors)
+            Logger.Add(new("File contains syntax error(s); parsing cannot start.", ErrorSeverity.Fatal, ErrorDomain.Parser));        
     }
 
 
     public TTable Parse()
-    {
+    {   
         TTable localRoot = DocumentRoot; //see documentation on local root for more info about this variable.
-
 
         while (TokenStream.TryPeek(out var currentToken))
         {
